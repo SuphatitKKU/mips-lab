@@ -1,0 +1,20 @@
+{
+  "name": "@lab/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {"dev": "vite --host 0.0.0.0", "build": "vite build"},
+  "dependencies": {
+    "@lab/contracts": "*",
+    "@lab/mips-core": "*",
+    "@codemirror/lang-cpp": "^6.0.3",
+    "@codemirror/commands": "^6.8.1",
+    "@codemirror/language": "^6.11.3",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/view": "^6.38.2",
+    "codemirror": "^6.0.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {"@types/react": "^19.1.10", "@types/react-dom": "^19.1.7", "vite": "^7.1.2"}
+}

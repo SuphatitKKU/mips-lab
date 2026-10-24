@@ -1,0 +1,37 @@
+{
+  "id": "mips-clamp",
+  "title": "จำกัดค่าให้อยู่ในช่วง 0 ถึง 10",
+  "category": "branch",
+  "difficulty": "medium",
+  "points": 25,
+  "tests": [
+    {
+      "input": {
+        "$a0": -5
+      },
+      "expected": {
+        "$v0": 0
+      }
+    },
+    {
+      "input": {
+        "$a0": 7
+      },
+      "expected": {
+        "$v0": 7
+      }
+    },
+    {
+      "input": {
+        "$a0": 15
+      },
+      "expected": {
+        "$v0": 10
+      }
+    }
+  ],
+  "solution": {
+    "c": "int main(int n) { if(n<0)return 0; if(n>10)return 10; return n; }",
+    "asm": "slt $t0, $a0, $zero\nbne $t0, $zero, low\nli $t1, 10\nslt $t0, $t1, $a0\nbne $t0, $zero, high\nmove $v0, $a0\nj end\nlow: li $v0, 0\nj end\nhigh: li $v0, 10\nend: nop"
+  }
+}

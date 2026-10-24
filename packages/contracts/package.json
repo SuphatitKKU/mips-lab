@@ -1,0 +1,6 @@
+{
+  "name": "@lab/contracts",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {".": "./index.ts"}
+}

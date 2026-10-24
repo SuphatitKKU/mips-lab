@@ -1,0 +1,40 @@
+{
+  "id": "mips-subtract",
+  "title": "ลบเลขสองจำนวน",
+  "category": "arithmetic",
+  "difficulty": "easy",
+  "points": 10,
+  "tests": [
+    {
+      "input": {
+        "$a0": 9,
+        "$a1": 4
+      },
+      "expected": {
+        "$v0": 5
+      }
+    },
+    {
+      "input": {
+        "$a0": -3,
+        "$a1": 7
+      },
+      "expected": {
+        "$v0": -10
+      }
+    },
+    {
+      "input": {
+        "$a0": 0,
+        "$a1": 0
+      },
+      "expected": {
+        "$v0": 0
+      }
+    }
+  ],
+  "solution": {
+    "c": "int main(int a, int b) { return a - b; }",
+    "asm": "subu $v0, $a0, $a1"
+  }
+}

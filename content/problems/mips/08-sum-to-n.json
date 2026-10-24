@@ -1,0 +1,37 @@
+{
+  "id": "mips-sum-to-n",
+  "title": "ผลบวก 1 ถึง N",
+  "category": "loop",
+  "difficulty": "medium",
+  "points": 25,
+  "tests": [
+    {
+      "input": {
+        "$a0": 0
+      },
+      "expected": {
+        "$v0": 0
+      }
+    },
+    {
+      "input": {
+        "$a0": 5
+      },
+      "expected": {
+        "$v0": 15
+      }
+    },
+    {
+      "input": {
+        "$a0": 10
+      },
+      "expected": {
+        "$v0": 55
+      }
+    }
+  ],
+  "solution": {
+    "c": "int main(int n) { int s=0; for(int i=1;i<=n;i++) s=s+i; return s; }",
+    "asm": "li $v0, 0\nli $t0, 1\nloop: slt $t1, $a0, $t0\nbne $t1, $zero, end\naddu $v0, $v0, $t0\naddiu $t0, $t0, 1\nj loop\nend: nop"
+  }
+}

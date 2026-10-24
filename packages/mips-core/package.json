@@ -1,0 +1,7 @@
+{
+  "name": "@lab/mips-core",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {".": "./src/index.ts"},
+  "dependencies": {"@lab/contracts": "*"}
+}

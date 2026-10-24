@@ -1,0 +1,37 @@
+{
+  "id": "mips-factorial",
+  "title": "แฟกทอเรียล",
+  "category": "loop",
+  "difficulty": "medium",
+  "points": 30,
+  "tests": [
+    {
+      "input": {
+        "$a0": 0
+      },
+      "expected": {
+        "$v0": 1
+      }
+    },
+    {
+      "input": {
+        "$a0": 4
+      },
+      "expected": {
+        "$v0": 24
+      }
+    },
+    {
+      "input": {
+        "$a0": 6
+      },
+      "expected": {
+        "$v0": 720
+      }
+    }
+  ],
+  "solution": {
+    "c": "int main(int n) { int f=1; for(int i=2;i<=n;i++) f=f*i; return f; }",
+    "asm": "li $v0, 1\nli $t0, 2\nloop: slt $t1, $a0, $t0\nbne $t1, $zero, end\nmult $v0, $t0\nmflo $v0\naddiu $t0, $t0, 1\nj loop\nend: nop"
+  }
+}
