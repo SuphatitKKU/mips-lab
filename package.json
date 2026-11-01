@@ -6,33 +6,43 @@
   "scripts": {
     "dev": "concurrently -k -n api,web -c yellow,cyan \"npm:dev:api\" \"npm:dev:web\"",
     "dev:web": "vite",
-    "dev:api": "tsx watch --no-warnings --env-file-if-exists=.env server/index.ts",
-    "build": "tsc -b && tsc -p server && vite build",
-    "start": "node --no-warnings --env-file-if-exists=.env --import tsx server/index.ts",
+    "dev:api": "wrangler pages dev dist --port 3001",
+    "build": "tsc -b && tsc -p tsconfig.worker.json && vite build",
+    "start": "wrangler pages dev dist --port 3001",
     "preview": "vite preview",
     "test": "vitest run",
     "seed:demo": "tsx --no-warnings server/seed.ts",
-    "user": "tsx --no-warnings server/cli.ts"
+    "user": "tsx --no-warnings server/cli.ts",
+    "dev:legacy": "tsx watch --no-warnings --env-file-if-exists=.env server/index.ts",
+    "db:migrate:local": "wrangler d1 migrations apply mips-lab-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply mips-lab-db --remote",
+    "db:seed:local": "tsx scripts/seed-d1.ts",
+    "db:seed:remote": "tsx scripts/seed-d1.ts --remote",
+    "deploy": "npm run build && wrangler pages deploy dist --project-name mips-lab-kku --branch codex/cloudflare-teacher-dashboard",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
-    "express": "^4.21.2",
+    "express": "^4.22.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.28.0"
+    "react-router-dom": "^7.18.5"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261101.1",
+    "@playwright/test": "^1.64.1",
     "@types/express": "^4.17.21",
     "@types/node": "^22.10.2",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.4",
+    "@vitejs/plugin-react": "^6.1.2",
     "concurrently": "^9.1.0",
-    "tsx": "^4.19.2",
+    "tsx": "^4.23.15",
     "typescript": "~5.6.3",
-    "vite": "^5.4.11",
-    "vitest": "^2.1.8"
+    "vite": "^8.3.5",
+    "vitest": "^4.1.12",
+    "wrangler": "^4.156.0"
   },
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.12"
   }
 }

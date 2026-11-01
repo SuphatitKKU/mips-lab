@@ -1,4 +1,59 @@
-# MIPS Lab
+# MIPS Lab — Cloudflare classroom
+
+ดึงฐานจาก branch เพื่อน `mips-lab-web` (`f180d62`) แล้วทำต่อบน `codex/cloudflare-teacher-dashboard`
+
+ระบบปัจจุบัน: **React + TypeScript + Vite → Cloudflare Pages Functions → D1**
+
+เว็บ: https://mips-lab-kku.pages.dev · Google OAuth ยังไม่เปิด ใช้รหัสนักศึกษา/ชื่อผู้ใช้และรหัสผ่านที่อาจารย์สร้างให้
+
+- อาจารย์สร้าง/แก้โจทย์ C, MIPS, Z80 พร้อมเฉลย public/hidden cases คะแนน กลุ่มเรียน และวันส่ง
+- จัดการบัญชีนักศึกษา กลุ่ม ชั้นปี รหัสผ่าน การเปิด/ปิดบัญชี และดูคะแนน/ประวัติส่งรายคน
+- ชั้นปีคำนวณจากเลข 2 หลักแรกของรหัสและปีการศึกษาที่อาจารย์ตั้ง พร้อม override รายคน
+- ตรวจคำตอบและให้คะแนนฝั่ง server; draft/attempt/solve เก็บใน D1 จริง
+- ไม่ต้องมีฐานข้อมูลหรือ Google keys เดิม และไม่เปิด dev-login ใน production
+
+## เริ่มบนเครื่อง
+
+```sh
+npm ci
+npm run db:migrate:local
+npm run db:seed:local
+npm run build
+npm run dev
+```
+
+เว็บ http://localhost:5173 · local API :3001 · บัญชี local อยู่ `private/local-admin.json` (gitignored)
+
+```sh
+npm test
+npm run test:e2e
+npm run db:migrate:remote
+npm run db:seed:remote
+npm run deploy
+```
+
+บัญชี production อยู่ `private/remote-admin.json` ห้าม commit โฟลเดอร์ private, SQL seed, database dump หรือ credentials
+
+อ่าน [คู่มือ deploy/ใช้งาน](docs/cloudflare-deployment.md) และ [ผลตรวจ compiler/ระบบเดิม](docs/compiler-and-system-audit.md)
+
+## ที่มาของโจทย์
+
+branch เพื่อนขาด `src/data/` เพราะกฎ ignore `data/` ครอบทุกตำแหน่ง แก้เป็น `/data/` และประกอบ bank กลับเป็น 24 ข้อ ข้อ 14–24 ดัดแปลงจาก JSON ของ `origin/main`; ข้อ 1–13 สร้างจากพฤติกรรมที่ tests และ README เดิมอธิบาย ไม่ใช่ไฟล์ต้นฉบับที่กู้ครบทุกตัวอักษร ไม่มีข้อมูล user หรือคะแนนเดิมใน Git ให้ย้าย
+
+## โครงสร้าง
+
+- `functions/api/[[path]].ts` — Pages Functions API, authorization และ classroom workflow
+- `cloudflare/` — D1 queries, password/session และกติกาชั้นปี/คะแนน/validation
+- `migrations/` — schema D1; `scripts/seed-d1.ts` — seed ที่ไม่ทับข้อมูลเดิม
+- `src/lib/cc`, `src/lib/mips`, `src/lib/z80` — compiler, assembler และ simulator จาก branch เพื่อน
+- `src/screens/TeacherDashboard.tsx` — dashboard ที่เชื่อม D1 ผ่าน API
+- `e2e/` — ทดสอบ classroom จริงกับ local D1 และ browser
+- `server/` — backend Express/SQLite เดิม เก็บไว้เป็น reference; ไม่ได้ deploy และ CLI ในนี้ไม่แก้ D1
+
+## เอกสารของ branch เพื่อน (ประวัติ ก่อนย้าย Cloudflare)
+
+รายละเอียดด้านล่างบันทึก backend/Google/SQLite แบบเดิม ไม่ใช่ขั้นตอนใช้งาน production ปัจจุบัน
+
 
 เว็บแอปฝึก C ⇄ MIPS และ Z80 (React + TypeScript + Vite, backend เป็น Node + SQLite) สร้างตาม design handoff "Modernist MIPS Lab v3"
 

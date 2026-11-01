@@ -215,7 +215,10 @@ export function runOnce(p: Runnable, code: string, args: (number | number[])[]):
   const sp0 = cpu.r[29];
   const halt = cpu.run(STEP_LIMIT);
 
-  const outputs: [string, string][] = p.returns.map(([r]) => [r, fmtWord(cpu.r[RN.indexOf(r.slice(1) as never)])]);
+  const outputs: [string, string][] = p.returns.map(([r]) => {
+    const name = r.replace(/^\$/, '');
+    return ['$' + name, fmtWord(cpu.r[RN.indexOf(name as never)])];
+  });
   // arrays the function was handed, as they are after the call
   k = 0;
   args.forEach((v, i) => {
