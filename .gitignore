@@ -1,5 +1,10 @@
 node_modules
 dist
 *.tsbuildinfo
-data/
+/data/
 .env
+.dev.vars
+.wrangler/
+playwright-report/
+test-results/
+/private/

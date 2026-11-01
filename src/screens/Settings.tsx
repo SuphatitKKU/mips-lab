@@ -16,7 +16,7 @@ export function Settings() {
   const { data, error, reload } = useApi<{ user: Me; sections: string[] }>('/profile');
   const me = data?.user ?? user;
   const isTeacher = me?.role === 'teacher';
-  const idLocked = !isTeacher && !!me && STUDENT_ID_RE.test(me.studentId);
+  const idLocked = true;
 
   const [name, setName] = useState('');
   const [studentId, setStudentId] = useState('');
@@ -117,7 +117,7 @@ export function Settings() {
               {me && <RoleChip role={me.role} />}
             </span>
             <span style={{ fontSize: 14, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {isTeacher ? `ชื่อผู้ใช้ ${me?.studentId ?? ''}` : (me?.email ?? 'ยังไม่ได้ผูกบัญชี Google')}
+              {isTeacher ? `ชื่อผู้ใช้ ${me?.studentId ?? ''}` : ('รหัสนักศึกษา ' + (me?.studentId ?? ''))}
               {!isTeacher && me?.section ? ` · ${me.section}` : ''}
             </span>
           </div>
@@ -140,13 +140,14 @@ export function Settings() {
                 <input
                   className="input"
                   value={studentId}
+                  disabled
                   onChange={(e) => setStudentId(e.target.value.toLowerCase())}
                   autoComplete="username"
                   autoCapitalize="none"
                   spellCheck={false}
                   maxLength={32}
                 />
-                <span style={{ fontSize: 13, fontWeight: 400, color: 'var(--muted)' }}>a–z, 0–9, . _ - ยาว 3–32 ตัว</span>
+                <span style={{ fontSize: 13, fontWeight: 400, color: 'var(--muted)' }}>ติดต่ออาจารย์เพื่อแก้ชื่อผู้ใช้</span>
               </label>
             )}
 
@@ -179,17 +180,17 @@ export function Settings() {
             {!isTeacher && (
               <label className="field">
                 กลุ่มเรียน (section)
-                <input className="input" value={section} onChange={(e) => setSection(e.target.value)} list="sections" maxLength={40} placeholder="เช่น SEC 1" />
+                <input className="input" value={section} disabled onChange={(e) => setSection(e.target.value)} list="sections" maxLength={40} placeholder="เช่น SEC 1" />
                 <datalist id="sections">
                   {data?.sections.map((s) => <option key={s} value={s} />)}
                 </datalist>
-                <span style={{ fontSize: 13, fontWeight: 400, color: 'var(--muted)' }}>ใช้จัดกลุ่มในกระดานอันดับ "กลุ่มของฉัน"</span>
+                <span style={{ fontSize: 13, fontWeight: 400, color: 'var(--muted)' }}>อาจารย์เป็นผู้กำหนดกลุ่มเรียน</span>
               </label>
             )}
 
             {!isTeacher && (
               <label className="field">
-                อีเมล Google
+                อีเมล (ยังไม่ผูก Google)
                 <input className="input" value={me?.email ?? '—'} disabled style={{ color: 'var(--muted)' }} />
               </label>
             )}
@@ -209,7 +210,7 @@ export function Settings() {
           </form>
         )}
 
-        {isTeacher && data && <ChangePassword />}
+        {data && <ChangePassword />}
 
         <section aria-label="ออกจากระบบ" className="card" style={{ padding: '20px 28px', display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
           <span style={{ flex: 1, minWidth: 200, color: 'var(--body-alt)' }}>ออกจากระบบบนเครื่องนี้</span>
@@ -234,7 +235,7 @@ function ChangePassword() {
   const save = async (e: FormEvent) => {
     e.preventDefault();
     if (busy) return;
-    if (next.length < 8) return setErr('รหัสผ่านใหม่ต้องยาวอย่างน้อย 8 ตัว');
+    if (next.length < 10) return setErr('รหัสผ่านใหม่ต้องยาวอย่างน้อย 10 ตัว');
     if (next !== again) return setErr('รหัสผ่านใหม่ทั้งสองช่องไม่ตรงกัน');
     setErr('');
     setBusy(true);
@@ -261,11 +262,11 @@ function ChangePassword() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 20 }}>
         <label className="field">
           รหัสผ่านใหม่
-          <input className="input" type="password" value={next} onChange={(e) => setNext(e.target.value)} autoComplete="new-password" minLength={8} required />
+          <input className="input" type="password" value={next} onChange={(e) => setNext(e.target.value)} autoComplete="new-password" minLength={10} required />
         </label>
         <label className="field">
           ยืนยันรหัสผ่านใหม่
-          <input className="input" type="password" value={again} onChange={(e) => setAgain(e.target.value)} autoComplete="new-password" minLength={8} required />
+          <input className="input" type="password" value={again} onChange={(e) => setAgain(e.target.value)} autoComplete="new-password" minLength={10} required />
         </label>
       </div>
       {err && (
