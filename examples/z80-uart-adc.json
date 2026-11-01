@@ -1,0 +1,109 @@
+{
+ "name": "ส่งค่า ADC ขึ้นเว็บ",
+ "board": {
+  "parts": [
+   {
+    "id": "kit1",
+    "type": "KIT",
+    "x": 40,
+    "y": 80,
+    "rot": 0
+   },
+   {
+    "id": "d1",
+    "type": "LED",
+    "x": 70,
+    "y": 320,
+    "rot": 0
+   },
+   {
+    "id": "vr1",
+    "type": "MODA",
+    "model": "slidepot",
+    "pos": 0.5,
+    "x": 300,
+    "y": 320,
+    "rot": 0
+   }
+  ],
+  "wires": [
+   {
+    "a": "d1.1",
+    "b": "kit1.1"
+   },
+   {
+    "a": "d1.2",
+    "b": "kit1.2"
+   },
+   {
+    "a": "d1.3",
+    "b": "kit1.3"
+   },
+   {
+    "a": "d1.4",
+    "b": "kit1.4"
+   },
+   {
+    "a": "d1.5",
+    "b": "kit1.5"
+   },
+   {
+    "a": "d1.6",
+    "b": "kit1.6"
+   },
+   {
+    "a": "d1.7",
+    "b": "kit1.7"
+   },
+   {
+    "a": "d1.8",
+    "b": "kit1.8"
+   },
+   {
+    "a": "d1.9",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.10",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.11",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.12",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.13",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.14",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.15",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.16",
+    "b": "rail:gb"
+   },
+   {
+    "a": "vr1.3",
+    "b": "kit1.27"
+   },
+   {
+    "a": "vr1.1",
+    "b": "rail:vb"
+   },
+   {
+    "a": "vr1.2",
+    "b": "rail:gb"
+   }
+  ]
+ },
+ "code": "; ส่งค่า ADC ขึ้นเว็บ\n;   ตัวต้านทานแบบเลื่อนต่อที่ AIN (ADC พอร์ต 04h)\n;   อ่านค่า 0–255 แล้วส่งข้อความ \"ADC = ###\" ขึ้น terminal ทุกครึ่งวินาที\n;   และแสดงค่าเดียวกันบน LED ที่ OUT 01h\n\n        ORG  0000h\nSTART:  LD   SP, 0FFFFh\n        CALL UINIT\nLOOP:   OUT  (04h), A      ; เริ่มแปลง\n        LD   B, 20\nW1:     DJNZ W1            ; รอให้แปลงเสร็จ\n        IN   A, (04h)      ; ค่า 0–255\n        OUT  (01h), A\n        PUSH AF\n        LD   HL, LABEL\n        CALL PUTS\n        POP  AF\n        CALL PUTDEC\n        LD   HL, CRLF\n        CALL PUTS\n        CALL DELAY\n        JR   LOOP\n\n; ส่ง A เป็นเลขฐานสิบ 3 หลัก\nPUTDEC: LD   B, 100\n        CALL DIGIT\n        LD   B, 10\n        CALL DIGIT\n        ADD  A, 30h\n        JP   PUTC\nDIGIT:  LD   C, 30h        ; นับว่าลบ B ได้กี่ครั้ง\nDG1:    CP   B\n        JR   C, DG2\n        SUB  B\n        INC  C\n        JR   DG1\nDG2:    PUSH AF\n        LD   A, C\n        CALL PUTC\n        POP  AF\n        RET\n\nLABEL:  DB   'ADC = ', 0\nCRLF:   DB   0Dh, 0Ah, 0\n\n; ---------- 8251A ของบอร์ดสำเร็จ: 06h ข้อมูล · 07h คำสั่ง/สถานะ ----------\nUINIT:  LD   A, 4Eh\n        OUT  (07h), A      ; โหมด: async 8 บิต ไม่มี parity 1 stop ×16\n        LD   A, 15h\n        OUT  (07h), A      ; คำสั่ง: เปิดตัวส่ง (บิต 0) และตัวรับ (บิต 2)\n        RET\n; ส่ง A ออก TxD\nPUTC:   PUSH AF\nPC1:    IN   A, (07h)\n        BIT  0, A          ; TxRDY = พร้อมส่ง\n        JR   Z, PC1\n        POP  AF\n        OUT  (06h), A\n        RET\n; ส่งข้อความที่ HL ชี้ (จบด้วยไบต์ 0)\nPUTS:   LD   A, (HL)\n        OR   A\n        RET  Z\n        CALL PUTC\n        INC  HL\n        JR   PUTS\n; รอจนมีไบต์เข้าทาง RxD แล้วคืนใน A\nGETC:   IN   A, (07h)\n        BIT  1, A          ; RxRDY = มีไบต์รออ่าน\n        JR   Z, GETC\n        IN   A, (06h)\n        RET\n\n; หน่วงเวลา — ประมาณครึ่งวินาทีที่ clock 10 kHz\nDELAY:  PUSH AF\n        PUSH BC\n        LD   BC, 00C0h\nDLY1:   DEC  BC\n        LD   A, B\n        OR   C\n        JR   NZ, DLY1\n        POP  BC\n        POP  AF\n        RET\n"
+}
