@@ -1,0 +1,161 @@
+{
+ "name": "ตัวนับกดปุ่ม 0–9",
+ "board": {
+  "parts": [
+   {
+    "id": "kit1",
+    "type": "KIT",
+    "x": 40,
+    "y": 80,
+    "rot": 0
+   },
+   {
+    "id": "ds1",
+    "type": "7SG",
+    "x": 70,
+    "y": 300,
+    "rot": 0
+   },
+   {
+    "id": "d1",
+    "type": "LED",
+    "x": 230,
+    "y": 320,
+    "rot": 0
+   },
+   {
+    "id": "sw1",
+    "type": "BTN",
+    "x": 470,
+    "y": 320,
+    "rot": 0
+   },
+   {
+    "id": "sw2",
+    "type": "BTN",
+    "x": 590,
+    "y": 320,
+    "rot": 0
+   }
+  ],
+  "wires": [
+   {
+    "a": "ds1.1",
+    "b": "kit1.5"
+   },
+   {
+    "a": "ds1.2",
+    "b": "kit1.4"
+   },
+   {
+    "a": "ds1.4",
+    "b": "kit1.3"
+   },
+   {
+    "a": "ds1.5",
+    "b": "kit1.8"
+   },
+   {
+    "a": "ds1.6",
+    "b": "kit1.2"
+   },
+   {
+    "a": "ds1.7",
+    "b": "kit1.1"
+   },
+   {
+    "a": "ds1.9",
+    "b": "kit1.6"
+   },
+   {
+    "a": "ds1.10",
+    "b": "kit1.7"
+   },
+   {
+    "a": "ds1.3",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.1",
+    "b": "kit1.9"
+   },
+   {
+    "a": "d1.2",
+    "b": "kit1.10"
+   },
+   {
+    "a": "d1.3",
+    "b": "kit1.11"
+   },
+   {
+    "a": "d1.4",
+    "b": "kit1.12"
+   },
+   {
+    "a": "d1.5",
+    "b": "kit1.13"
+   },
+   {
+    "a": "d1.6",
+    "b": "kit1.14"
+   },
+   {
+    "a": "d1.7",
+    "b": "kit1.15"
+   },
+   {
+    "a": "d1.8",
+    "b": "kit1.16"
+   },
+   {
+    "a": "d1.9",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.10",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.11",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.12",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.13",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.14",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.15",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.16",
+    "b": "rail:gb"
+   },
+   {
+    "a": "sw1.1",
+    "b": "kit1.17"
+   },
+   {
+    "a": "sw1.3",
+    "b": "rail:gb"
+   },
+   {
+    "a": "sw2.1",
+    "b": "kit1.18"
+   },
+   {
+    "a": "sw2.3",
+    "b": "rail:gb"
+   }
+  ]
+ },
+ "code": "; ตัวนับ 0–9 ด้วยปุ่ม\n;   7-segment  = OUT 01h (เลขฐานสิบ)\n;   LED 8 ดวง  = OUT 02h (เลขเดียวกันในฐานสอง)\n;   SW1        = IN 03h บิต 0 → +1 (เกิน 9 วนกลับ 0)\n;   SW2        = IN 03h บิต 1 → กลับเป็น 0\n;   ปุ่มกด = อ่านได้ 0, ปล่อย = 1\n\n        ORG  0000h\nSTART:  LD   SP, 0FFFFh\n        LD   C, 0          ; C = ค่านับ\nSHOW:   LD   A, C\n        CALL SHOW1         ; เลขบน 7-segment\n        LD   A, C\n        OUT  (02h), A      ; เลขฐานสองบน LED\nWAIT:   IN   A, (03h)\n        BIT  0, A\n        JR   Z, PLUS       ; SW1 ถูกกด\n        BIT  1, A\n        JR   Z, CLEAR      ; SW2 ถูกกด\n        JR   WAIT\nPLUS:   INC  C\n        LD   A, C\n        CP   10\n        JR   C, RELEASE    ; ยังไม่ถึง 10\n        LD   C, 0          ; เกิน 9 วนกลับ 0\n        JR   RELEASE\nCLEAR:  LD   C, 0\nRELEASE: IN  A, (03h)      ; รอจนปล่อยทั้งสองปุ่ม\n        AND  03h\n        CP   03h\n        JR   NZ, RELEASE\n        CALL DELAY         ; กันปุ่มเด้ง\n        JR   SHOW\n\n; แสดงเลข 0–9 ใน A บน 7-segment ที่ OUT 01h\nSHOW1:  PUSH HL\n        PUSH DE\n        LD   HL, SEGTAB\n        LD   D, 0\n        LD   E, A\n        ADD  HL, DE\n        LD   A, (HL)\n        OUT  (01h), A\n        POP  DE\n        POP  HL\n        RET\nSEGTAB: DB   3Fh, 06h, 5Bh, 4Fh, 66h, 6Dh, 7Dh, 07h, 7Fh, 6Fh\n\n; หน่วงเวลา — สั้นๆ ไว้กันปุ่มเด้ง\nDELAY:  PUSH AF\n        PUSH BC\n        LD   BC, 0040h\nDLY1:   DEC  BC\n        LD   A, B\n        OR   C\n        JR   NZ, DLY1\n        POP  BC\n        POP  AF\n        RET\n"
+}

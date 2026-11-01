@@ -1,0 +1,88 @@
+{
+ "name": "ทายเลขผ่าน terminal",
+ "board": {
+  "parts": [
+   {
+    "id": "kit1",
+    "type": "KIT",
+    "x": 40,
+    "y": 80,
+    "rot": 0
+   },
+   {
+    "id": "d1",
+    "type": "LED",
+    "x": 70,
+    "y": 320,
+    "rot": 0
+   }
+  ],
+  "wires": [
+   {
+    "a": "d1.1",
+    "b": "kit1.1"
+   },
+   {
+    "a": "d1.2",
+    "b": "kit1.2"
+   },
+   {
+    "a": "d1.3",
+    "b": "kit1.3"
+   },
+   {
+    "a": "d1.4",
+    "b": "kit1.4"
+   },
+   {
+    "a": "d1.5",
+    "b": "kit1.5"
+   },
+   {
+    "a": "d1.6",
+    "b": "kit1.6"
+   },
+   {
+    "a": "d1.7",
+    "b": "kit1.7"
+   },
+   {
+    "a": "d1.8",
+    "b": "kit1.8"
+   },
+   {
+    "a": "d1.9",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.10",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.11",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.12",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.13",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.14",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.15",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.16",
+    "b": "rail:gb"
+   }
+  ]
+ },
+ "code": "; ทายเลข 0–9 ผ่าน serial terminal\n;   กด “เปิด terminal” ใต้บอร์ด แล้วพิมพ์ในแท็บนั้น → เข้า Z80 ทาง RxD\n;   Z80 ตอบกลับทาง TxD → ขึ้นใน terminal\n;   LED ที่ OUT 01h แสดงจำนวนครั้งที่ทาย\n\n        ORG  0000h\nSTART:  LD   SP, 0FFFFh\n        CALL UINIT\n        LD   HL, HELLO\n        CALL PUTS\nNEW:    LD   HL, PRESS\n        CALL PUTS\n        LD   C, 0\nSEED:   INC  C             ; นับไปเรื่อยๆ ระหว่างรอ — ค่าที่ได้ขึ้นกับจังหวะที่กด\n        IN   A, (07h)\n        BIT  1, A\n        JR   Z, SEED\n        IN   A, (06h)      ; ทิ้งปุ่มที่กดเริ่ม\n        LD   A, C\nMOD10:  CP   10            ; เหลือเศษจากการหารด้วย 10\n        JR   C, GOTIT\n        SUB  10\n        JR   MOD10\nGOTIT:  LD   E, A          ; E = เลขลับ 0–9\n        LD   D, 0          ; D = จำนวนครั้งที่ทาย\n        LD   A, D\n        OUT  (01h), A\n        LD   HL, ASK\n        CALL PUTS\nGUESS:  CALL GETC\n        CP   30h           ; ต่ำกว่า '0' ไม่ใช่ตัวเลข\n        JR   C, GUESS\n        CP   3Ah           ; สูงกว่า '9' ไม่ใช่ตัวเลข\n        JR   NC, GUESS\n        CALL PUTC          ; แสดงตัวที่พิมพ์\n        SUB  30h           ; '0'–'9' → 0–9\n        LD   B, A\n        INC  D\n        LD   A, D\n        OUT  (01h), A      ; จำนวนครั้งบน LED\n        LD   A, B\n        CP   E\n        JR   Z, WIN\n        LD   HL, HIGHER\n        JR   C, SAY        ; ทายน้อยไป\n        LD   HL, LOWER\nSAY:    CALL PUTS\n        JR   GUESS\nWIN:    LD   HL, RIGHT\n        CALL PUTS\n        LD   A, D\n        CP   10\n        JR   NC, MANY\n        ADD  A, 30h\n        CALL PUTC\n        JR   DONE\nMANY:   LD   A, 2Bh        ; '+' เมื่อเกิน 9 ครั้ง\n        CALL PUTC\nDONE:   LD   HL, CRLF\n        CALL PUTS\n        JR   NEW\n\nHELLO:  DB   'Z80 guessing game', 0Dh, 0Ah, 0\nPRESS:  DB   0Dh, 0Ah, 'Press any key to start', 0Dh, 0Ah, 0\nASK:    DB   'Guess 0-9 > ', 0\nHIGHER: DB   '  higher', 0Dh, 0Ah, 'Guess 0-9 > ', 0\nLOWER:  DB   '  lower', 0Dh, 0Ah, 'Guess 0-9 > ', 0\nRIGHT:  DB   '  correct! tries = ', 0\nCRLF:   DB   0Dh, 0Ah, 0\n\n; ---------- 8251A ของบอร์ดสำเร็จ: 06h ข้อมูล · 07h คำสั่ง/สถานะ ----------\nUINIT:  LD   A, 4Eh\n        OUT  (07h), A      ; โหมด: async 8 บิต ไม่มี parity 1 stop ×16\n        LD   A, 15h\n        OUT  (07h), A      ; คำสั่ง: เปิดตัวส่ง (บิต 0) และตัวรับ (บิต 2)\n        RET\n; ส่ง A ออก TxD\nPUTC:   PUSH AF\nPC1:    IN   A, (07h)\n        BIT  0, A          ; TxRDY = พร้อมส่ง\n        JR   Z, PC1\n        POP  AF\n        OUT  (06h), A\n        RET\n; ส่งข้อความที่ HL ชี้ (จบด้วยไบต์ 0)\nPUTS:   LD   A, (HL)\n        OR   A\n        RET  Z\n        CALL PUTC\n        INC  HL\n        JR   PUTS\n; รอจนมีไบต์เข้าทาง RxD แล้วคืนใน A\nGETC:   IN   A, (07h)\n        BIT  1, A          ; RxRDY = มีไบต์รออ่าน\n        JR   Z, GETC\n        IN   A, (06h)\n        RET\n"
+}

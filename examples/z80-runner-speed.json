@@ -1,0 +1,161 @@
+{
+ "name": "ไฟวิ่งปรับความเร็ว",
+ "board": {
+  "parts": [
+   {
+    "id": "kit1",
+    "type": "KIT",
+    "x": 40,
+    "y": 80,
+    "rot": 0
+   },
+   {
+    "id": "d1",
+    "type": "LED",
+    "x": 70,
+    "y": 320,
+    "rot": 0
+   },
+   {
+    "id": "ds1",
+    "type": "7SG",
+    "x": 260,
+    "y": 300,
+    "rot": 0
+   },
+   {
+    "id": "sw1",
+    "type": "BTN",
+    "x": 470,
+    "y": 320,
+    "rot": 0
+   },
+   {
+    "id": "sw2",
+    "type": "BTN",
+    "x": 590,
+    "y": 320,
+    "rot": 0
+   }
+  ],
+  "wires": [
+   {
+    "a": "d1.1",
+    "b": "kit1.1"
+   },
+   {
+    "a": "d1.2",
+    "b": "kit1.2"
+   },
+   {
+    "a": "d1.3",
+    "b": "kit1.3"
+   },
+   {
+    "a": "d1.4",
+    "b": "kit1.4"
+   },
+   {
+    "a": "d1.5",
+    "b": "kit1.5"
+   },
+   {
+    "a": "d1.6",
+    "b": "kit1.6"
+   },
+   {
+    "a": "d1.7",
+    "b": "kit1.7"
+   },
+   {
+    "a": "d1.8",
+    "b": "kit1.8"
+   },
+   {
+    "a": "d1.9",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.10",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.11",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.12",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.13",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.14",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.15",
+    "b": "rail:gb"
+   },
+   {
+    "a": "d1.16",
+    "b": "rail:gb"
+   },
+   {
+    "a": "ds1.1",
+    "b": "kit1.13"
+   },
+   {
+    "a": "ds1.2",
+    "b": "kit1.12"
+   },
+   {
+    "a": "ds1.4",
+    "b": "kit1.11"
+   },
+   {
+    "a": "ds1.5",
+    "b": "kit1.16"
+   },
+   {
+    "a": "ds1.6",
+    "b": "kit1.10"
+   },
+   {
+    "a": "ds1.7",
+    "b": "kit1.9"
+   },
+   {
+    "a": "ds1.9",
+    "b": "kit1.14"
+   },
+   {
+    "a": "ds1.10",
+    "b": "kit1.15"
+   },
+   {
+    "a": "ds1.3",
+    "b": "rail:gb"
+   },
+   {
+    "a": "sw1.1",
+    "b": "kit1.17"
+   },
+   {
+    "a": "sw1.3",
+    "b": "rail:gb"
+   },
+   {
+    "a": "sw2.1",
+    "b": "kit1.18"
+   },
+   {
+    "a": "sw2.3",
+    "b": "rail:gb"
+   }
+  ]
+ },
+ "code": "; ไฟวิ่งปรับความเร็วด้วยปุ่ม\n;   LED 8 ดวง  = OUT 01h (ไฟวิ่ง)\n;   7-segment  = OUT 02h (ระดับความเร็ว 1–9)\n;   SW1        = IN 03h บิต 0 → เร็วขึ้น\n;   SW2        = IN 03h บิต 1 → ช้าลง\n\n        ORG  0000h\nSTART:  LD   SP, 0FFFFh\n        LD   D, 01h        ; D = ตำแหน่งไฟ\n        LD   E, 5          ; E = ระดับความเร็ว 1–9\n        LD   L, 0FFh       ; ปุ่มครั้งก่อน: ปล่อยหมด\n        LD   A, E\n        CALL SHOW2\nLOOP:   LD   A, D\n        OUT  (01h), A\n        LD   A, 10\n        SUB  E\n        LD   B, A          ; B = 10 − ระดับ → ยิ่งระดับสูง ยิ่งรอสั้น\nWAITS:  CALL KEYS\n        CALL DELAY\n        DJNZ WAITS\n        RLC  D             ; เลื่อนไฟไปดวงถัดไป (D7 วนกลับ D0)\n        JR   LOOP\n\n; ปรับระดับตามปุ่มที่เพิ่งกด แล้วแสดงระดับ\nKEYS:   CALL EDGES\n        BIT  0, H\n        JR   Z, K1\n        LD   A, E\n        CP   9\n        JR   NC, K1\n        INC  E             ; SW1: เร็วขึ้น\nK1:     BIT  1, H\n        JR   Z, K2\n        LD   A, E\n        CP   2\n        JR   C, K2\n        DEC  E             ; SW2: ช้าลง\nK2:     LD   A, E\n        JP   SHOW2\n\n; อ่านปุ่ม: H = บิตของปุ่มที่ \"เพิ่งกด\" ตั้งแต่ครั้งก่อน (1 = เพิ่งกด)\n;           L = ค่าปุ่มครั้งก่อน (ตั้งเป็น 0FFh ตอนเริ่ม)\nEDGES:  IN   A, (03h)\n        LD   C, A\n        CPL                ; 1 = กดอยู่\n        AND  L             ; และครั้งก่อนยังปล่อยอยู่\n        LD   H, A\n        LD   L, C          ; จำไว้เทียบครั้งหน้า\n        RET\n\n; แสดงเลข 0–9 ใน A บน 7-segment ที่ OUT 02h\nSHOW2:  PUSH HL\n        PUSH DE\n        LD   HL, SEGTAB\n        LD   D, 0\n        LD   E, A\n        ADD  HL, DE\n        LD   A, (HL)\n        OUT  (02h), A\n        POP  DE\n        POP  HL\n        RET\nSEGTAB: DB   3Fh, 06h, 5Bh, 4Fh, 66h, 6Dh, 7Dh, 07h, 7Fh, 6Fh\n\n; หน่วงเวลา — หน่วยเวลาเล็กๆ ของไฟวิ่ง\nDELAY:  PUSH AF\n        PUSH BC\n        LD   BC, 0030h\nDLY1:   DEC  BC\n        LD   A, B\n        OR   C\n        JR   NZ, DLY1\n        POP  BC\n        POP  AF\n        RET\n"
+}
