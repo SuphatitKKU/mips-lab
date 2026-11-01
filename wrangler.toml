@@ -1,0 +1,9 @@
+name = "mips-lab-kku"
+pages_build_output_dir = "./dist"
+compatibility_date = "2026-10-30"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "mips-lab-db"
+database_id = "a8b3d24c-e1e8-4f92-95a6-4770717fd126"
+migrations_dir = "migrations"
