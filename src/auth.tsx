@@ -1,12 +1,17 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
-import { api, getToken, setToken, UNAUTHORIZED } from './api';
+import { api, getToken, NEEDS_CLASS, setToken, UNAUTHORIZED } from './api';
 
 export type Role = 'student' | 'teacher';
 
 export interface Me {
   studentId: string;
   name: string;
+  /** current class as "SEC 1 · 2/2569", '' when none */
   section: string;
+  /** null = student hasn't joined a class yet (undefined on a user cached before classes existed) */
+  classId?: number | null;
+  /** student with no class, or whose class was closed: shown the join page instead of the app */
+  needsClass?: boolean;
   initials: string;
   role: Role;
   email: string | null;
@@ -59,8 +64,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setTok(null);
       setUser(null);
     };
+    // the server refused because the student has no open class → refresh the profile so the join screen shows
+    const onNeedsClass = () =>
+      void api<{ user: Me }>('/profile')
+        .then((r) => updateUser(r.user))
+        .catch(() => undefined);
     window.addEventListener(UNAUTHORIZED, onUnauth);
-    return () => window.removeEventListener(UNAUTHORIZED, onUnauth);
+    window.addEventListener(NEEDS_CLASS, onNeedsClass);
+    return () => {
+      window.removeEventListener(UNAUTHORIZED, onUnauth);
+      window.removeEventListener(NEEDS_CLASS, onNeedsClass);
+    };
   }, []);
 
   // refresh the cached user so role / profile changes made elsewhere show up

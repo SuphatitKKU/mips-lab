@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { Link, Navigate, Outlet, useLocation } from 'react-router-dom';
 import { ROLE_LABEL, useAuth } from '../auth';
+import { ClassGate } from './ClassGate';
 import { Icon, ICON } from './Icon';
 import { Tour, TOUR_EVENT } from './Tour';
 
@@ -29,6 +30,8 @@ export function AppShell() {
   }, [pathname]);
 
   if (!loggedIn) return <Navigate to="/login" replace state={{ from: pathname }} />;
+  // students without an open class get the join page instead of the app
+  if (user?.needsClass) return <ClassGate />;
 
   return (
     <div className="app">

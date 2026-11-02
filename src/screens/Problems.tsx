@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useApi } from '../api';
+import { DueChip, dueState } from '../components/DueChip';
 import { Icon, ICON } from '../components/Icon';
 import { ErrorBox, LevelChip, PageHeader, Skeleton } from '../components/ui';
 import { M, OK } from '../lib/tokens';
@@ -18,6 +19,9 @@ export interface ProblemSummary {
   status: Status;
   passed?: number;
   total?: number;
+  /** deadline when the teacher assigned it to this student's class */
+  dueAt: number | null;
+  solvedAt: number | null;
 }
 
 function StatusIcon({ st }: { st: Status }) {
@@ -53,7 +57,7 @@ const ST_FILTERS: [Status | 'all', string][] = [
 export function Problems() {
   const { data, error, loading, reload } = useApi<{ topics: string[]; problems: ProblemSummary[] }>('/problems');
   const [topic, setTopic] = useState('ทั้งหมด');
-  const [st, setSt] = useState<Status | 'all'>('all');
+  const [st, setSt] = useState<Status | 'all' | 'assigned'>('all');
   const [query, setQuery] = useState('');
   const [shown, setShown] = useState(PAGE);
   const q = query.trim().toLowerCase();
@@ -61,12 +65,17 @@ export function Problems() {
   const list = all.filter(
     (p) =>
       (topic === 'ทั้งหมด' || p.topic === topic) &&
-      (st === 'all' || p.status === st) &&
+      (st === 'all' || (st === 'assigned' ? p.dueAt != null : p.status === st)) &&
       (!q || `${p.id} ${p.title} ${p.sub}`.toLowerCase().includes(q)),
   );
   const passed = all.filter((p) => p.status === 'done').length;
   const total = all.length;
   const filtered = topic !== 'ทั้งหมด' || st !== 'all' || !!q;
+  // assigned work, soonest deadline first; done ones drop to the end
+  const work = all
+    .filter((p) => p.dueAt != null)
+    .sort((a, b) => Number(a.status === 'done') - Number(b.status === 'done') || a.dueAt! - b.dueAt!);
+  const onTime = work.filter((p) => dueState(p.dueAt!, p.solvedAt) === 'ontime').length;
 
   return (
     <>
@@ -110,6 +119,32 @@ export function Problems() {
           </div>
         </section>
 
+        {work.length > 0 && (
+          <section aria-label="งานที่ได้รับมอบหมาย" className="card" style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
+              <h2 style={{ fontSize: 18, flex: 1 }}>งานที่ได้รับมอบหมาย</h2>
+              <span style={{ fontSize: 14, color: 'var(--muted)' }}>
+                ส่งตรงเวลา <b style={{ color: 'var(--ok-deep)' }}>{onTime}</b> / {work.length} ข้อ
+              </span>
+            </div>
+            <ol style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {work.map((p) => (
+                <li key={p.id}>
+                  <Link to={`/problems/${p.id}`} className="prob-row" style={{ padding: '10px 12px' }}>
+                    <span style={{ display: 'flex', flex: 'none' }}>
+                      <StatusIcon st={p.status} />
+                    </span>
+                    <span style={{ flex: 1, minWidth: 0, fontWeight: 600 }}>
+                      {p.id}. {p.title}
+                    </span>
+                    <DueChip dueAt={p.dueAt!} solvedAt={p.solvedAt} />
+                  </Link>
+                </li>
+              ))}
+            </ol>
+          </section>
+        )}
+
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
           <div role="group" aria-label="หัวข้อ" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, flex: 1 }}>
             {['ทั้งหมด', ...(data?.topics ?? [])].map((t) => (
@@ -131,7 +166,7 @@ export function Problems() {
             className="select-pill"
             value={st}
             onChange={(e) => {
-              setSt(e.target.value as Status | 'all');
+              setSt(e.target.value as Status | 'all' | 'assigned');
               setShown(PAGE);
             }}
           >
@@ -140,6 +175,7 @@ export function Problems() {
                 {l}
               </option>
             ))}
+            {work.length > 0 && <option value="assigned">งานที่มอบหมาย</option>}
           </select>
         </div>
 
@@ -181,6 +217,7 @@ export function Problems() {
                       </span>
                       <span style={{ fontSize: 14, color: doing ? 'var(--m)' : 'var(--muted)' }}>{sub}</span>
                     </span>
+                    {p.dueAt != null && <DueChip dueAt={p.dueAt} solvedAt={p.solvedAt} />}
                     <LevelChip lv={p.level} />
                     <span
                       style={{

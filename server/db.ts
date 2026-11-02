@@ -1,10 +1,14 @@
 // SQLite storage (Node's built-in node:sqlite) plus the scoring / ranking queries.
 
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readdirSync, unlinkSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import type * as Sqlite from 'node:sqlite';
+// loaded this way (not a static import) so the test runner, which doesn't know node:sqlite yet, can load this file too
+const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as typeof Sqlite;
 import { FIRST_TRY_BONUS, POINTS, PROBLEMS, problemById } from '../src/data/problems';
+import { CODE_ALPHABET, CODE_LEN, termOf, termText, type ClassInfo } from '../src/lib/terms';
+import { findSimilar } from './similarity';
 
 const DB_PATH = resolve(process.env.MIPSLAB_DB ?? 'data/mipslab.db');
 mkdirSync(dirname(DB_PATH), { recursive: true });
@@ -66,13 +70,52 @@ CREATE TABLE IF NOT EXISTS reset_requests (
   created_at INTEGER NOT NULL,
   done INTEGER NOT NULL DEFAULT 0
 );
+-- a class = one section in one academic term; students join with its code
+CREATE TABLE IF NOT EXISTS classes (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  year INTEGER NOT NULL,
+  term INTEGER NOT NULL,
+  code TEXT NOT NULL UNIQUE,
+  archived INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+-- names a teacher listed for a class before the student has an account (or a real student id):
+-- ident is a student id without dashes, or a lower-case email; claimed on sign-in / setting the id
+CREATE TABLE IF NOT EXISTS roster (
+  ident TEXT PRIMARY KEY,
+  class_id INTEGER NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+  added_at INTEGER NOT NULL
+);
+-- problems a teacher set for a class, each with a deadline
+CREATE TABLE IF NOT EXISTS assignments (
+  class_id INTEGER NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+  problem_id INTEGER NOT NULL,
+  due_at INTEGER NOT NULL,
+  PRIMARY KEY (class_id, problem_id)
+);
+-- what teachers did (who deleted which class, …), newest first on the teacher page
+CREATE TABLE IF NOT EXISTS audit (
+  id INTEGER PRIMARY KEY,
+  at INTEGER NOT NULL,
+  actor TEXT NOT NULL,
+  action TEXT NOT NULL,
+  detail TEXT NOT NULL
+);
 `);
+// the passing code is kept with each solve, for the similar-code check
+if (!(db.prepare('PRAGMA table_info(solves)').all() as { name: string }[]).some((c) => c.name === 'code')) db.exec('ALTER TABLE solves ADD COLUMN code TEXT');
 
 // columns added after the first release
 const userCols = new Set((db.prepare('PRAGMA table_info(users)').all() as { name: string }[]).map((c) => c.name));
 if (!userCols.has('email')) db.exec('ALTER TABLE users ADD COLUMN email TEXT');
 if (!userCols.has('google_sub')) db.exec('ALTER TABLE users ADD COLUMN google_sub TEXT');
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_email ON users(email); CREATE UNIQUE INDEX IF NOT EXISTS users_google ON users(google_sub);');
+const needsClassMigration = !userCols.has('class_id'); // runs at the bottom of this file
+// class history and term start dates were dropped: a student is only ever in their current class,
+// and deleting a class wipes its students' work, so nothing older needs to be told apart
+db.exec('DROP TABLE IF EXISTS enrollments');
+if ((db.prepare('PRAGMA table_info(classes)').all() as { name: string }[]).some((c) => c.name === 'starts_at')) db.exec('ALTER TABLE classes DROP COLUMN starts_at');
 
 // Students sign in with Google; teachers have a username (stored in student_id) and password.
 export type Role = 'student' | 'teacher';
@@ -81,7 +124,11 @@ export interface User {
   id: number;
   student_id: string;
   name: string;
+  /** label of the current class ("SEC 1 · 2/2569"), '' when none */
   section: string;
+  class_id: number | null;
+  /** 1 when the current class has been closed */
+  class_archived: number;
   role: Role;
   email: string | null;
 }
@@ -113,7 +160,12 @@ function newSession(userId: number): string {
   return token;
 }
 
-const USER_COLS = 'id, student_id, name, section, role, email';
+/** The current class as "SEC 1 · 2/2569" (same as classLabel), for a users row named `t`. */
+const sectionSql = (t: string) => `COALESCE((SELECT c.name || ' · ' || CASE c.term WHEN 3 THEN 'พิเศษ' ELSE c.term END || '/' || c.year FROM classes c WHERE c.id = ${t}.class_id), '')`;
+const userColsOf = (t: string) =>
+  `${t}.id, ${t}.student_id, ${t}.name, ${t}.role, ${t}.email, ${t}.class_id, ${sectionSql(t)} AS section,
+   COALESCE((SELECT c.archived FROM classes c WHERE c.id = ${t}.class_id), 0) AS class_archived`;
+const USER_COLS = userColsOf('users');
 
 /**
  * Signs in a verified Google account: matches by Google id, then by an email the
@@ -136,7 +188,7 @@ export function googleLogin(g: { sub: string; email: string; name: string }): { 
     db.prepare('INSERT INTO users (student_id, name, section, pw_hash, role, created_at, email, google_sub) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
       studentId,
       g.name || local,
-      process.env.MIPSLAB_DEFAULT_SECTION ?? '',
+      '',
       '!google', // no password login for this account
       'student',
       Date.now(),
@@ -147,6 +199,7 @@ export function googleLogin(g: { sub: string; email: string; name: string }): { 
     created = true;
   }
   if (user.role === 'teacher') throw new ProfileError('บัญชีอาจารย์เข้าด้วยชื่อผู้ใช้และรหัสผ่าน');
+  if (claimRoster(user.id)) user = userById(user.id)!;
   return { token: newSession(user.id), user, created };
 }
 
@@ -195,8 +248,8 @@ export function devLogin(role: Role = 'student'): { token: string; user: User } 
   const find = () => db.prepare(`SELECT ${USER_COLS} FROM users WHERE student_id = ?`).get(sid) as User | undefined;
   let user = find();
   if (!user) {
-    if (role === 'teacher') addUser(sid, 'อาจารย์ทดสอบ (dev)', '', null, 'teacher');
-    else addUser(sid, 'ผู้ทดสอบ (dev)', 'SEC 1', null);
+    // the test student starts without a class, so the join-code prompt can be tried
+    addUser(sid, role === 'teacher' ? 'อาจารย์ทดสอบ (dev)' : 'ผู้ทดสอบ (dev)', '', null, role);
     user = find()!;
   }
   return { token: newSession(user.id), user };
@@ -206,13 +259,9 @@ export function linkEmail(studentId: string, email: string): boolean {
   return Number(db.prepare('UPDATE users SET email = ? WHERE student_id = ?').run(email.toLowerCase(), studentId).changes) > 0;
 }
 
-export function setSection(studentId: string, section: string): boolean {
-  return Number(db.prepare('UPDATE users SET section = ? WHERE student_id = ?').run(section, studentId).changes) > 0;
-}
-
 export function userForToken(token: string): User | null {
   const row = db
-    .prepare('SELECT u.id, u.student_id, u.name, u.section, u.role, u.email FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at > ?')
+    .prepare(`SELECT ${userColsOf('u')} FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at > ?`)
     .get(token, Date.now()) as User | undefined;
   return row ?? null;
 }
@@ -232,7 +281,6 @@ export interface ProfilePatch {
   name?: string;
   /** student id for students, username for teachers */
   studentId?: string;
-  section?: string;
 }
 
 /** Validates and saves profile fields; throws ProfileError with a message for the user. */
@@ -257,13 +305,8 @@ export function updateUser(id: number, patch: ProfilePatch): User {
     sets.push('student_id = ?');
     vals.push(sid);
   }
-  if (patch.section !== undefined && !teacher) {
-    const section = patch.section.trim();
-    if (section.length > 40) throw new ProfileError('ชื่อกลุ่มยาวเกิน 40 ตัวอักษร');
-    sets.push('section = ?');
-    vals.push(section);
-  }
   if (sets.length) db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).run(...vals, id);
+  if (patch.studentId !== undefined && !teacher) claimRoster(id);
   return userById(id)!;
 }
 
@@ -271,28 +314,266 @@ export function teacherCount(): number {
   return (db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'teacher' AND pw_hash LIKE 'scrypt$%'").get() as { n: number }).n;
 }
 
-export function sections(): string[] {
-  return (db.prepare("SELECT DISTINCT section FROM users WHERE role = 'student' AND section != '' ORDER BY section").all() as { section: string }[]).map(
-    (r) => r.section,
+// ---------- classes ----------
+
+interface ClassDb {
+  id: number;
+  name: string;
+  year: number;
+  term: number;
+  code: string;
+  archived: number;
+  created_at: number;
+}
+const toClass = (r: ClassDb): ClassInfo => ({ id: r.id, name: r.name, year: r.year, term: r.term, code: r.code, archived: !!r.archived });
+
+/** Thrown when classes from an earlier term still exist: the teacher deletes them first. */
+export class OldClassesError extends Error {
+  constructor(readonly classes: ClassInfo[]) {
+    super(`ยังมีห้องของภาคเรียนก่อนอยู่ ${classes.length} ห้อง (${classes.map((c) => `${c.name} · ${termText(c)}`).join(', ')}) — ลบห้องเก่าก่อนจึงจะเปิดห้องใหม่ได้`);
+  }
+}
+
+/** Classes from a term before year/term (other than exceptId). */
+export function olderClasses(year: number, term: number, exceptId = 0): ClassInfo[] {
+  return (db.prepare('SELECT * FROM classes WHERE year * 10 + term < ? AND id != ? ORDER BY year, term, name').all(year * 10 + term, exceptId) as unknown as ClassDb[]).map(
+    toClass,
   );
+}
+
+function randomCode(): string {
+  for (;;) {
+    const code = Array.from(randomBytes(CODE_LEN), (b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join('');
+    if (!db.prepare('SELECT 1 FROM classes WHERE code = ?').get(code)) return code;
+  }
+}
+
+function checkClass(name: string, year: number, term: number, exceptId = 0): string {
+  const n = name.trim().replace(/\s+/g, ' ');
+  if (!n) throw new ProfileError('กรุณาใส่ชื่อห้อง เช่น SEC 1');
+  if (n.length > 40) throw new ProfileError('ชื่อห้องยาวเกิน 40 ตัวอักษร');
+  if (!Number.isInteger(year) || year < 2500 || year > 2700) throw new ProfileError('ปีการศึกษาต้องเป็น พ.ศ. เช่น 2569');
+  if (![1, 2, 3].includes(term)) throw new ProfileError('ภาคเรียนต้องเป็น 1, 2 หรือภาคเรียนพิเศษ');
+  if (db.prepare('SELECT 1 FROM classes WHERE name = ? AND year = ? AND term = ? AND id != ?').get(n, year, term, exceptId))
+    throw new ProfileError(`มีห้อง ${n} ในภาคเรียน ${term}/${year} แล้ว`);
+  return n;
+}
+
+function insertClass(name: string, year: number, term: number): ClassInfo {
+  const n = checkClass(name, year, term);
+  const r = db.prepare('INSERT INTO classes (name, year, term, code, created_at) VALUES (?, ?, ?, ?, ?)').run(n, year, term, randomCode(), Date.now());
+  return classById(Number(r.lastInsertRowid))!;
+}
+
+/** A new class. Throws OldClassesError while classes from an earlier term are still around. */
+export function createClass(name: string, year: number, term: number): ClassInfo {
+  checkClass(name, year, term);
+  const old = olderClasses(year, term);
+  if (old.length) throw new OldClassesError(old);
+  return insertClass(name, year, term);
+}
+
+export function classById(id: number): ClassInfo | null {
+  const r = db.prepare('SELECT * FROM classes WHERE id = ?').get(id) as ClassDb | undefined;
+  return r ? toClass(r) : null;
+}
+
+export function updateClass(id: number, patch: { name?: string; year?: number; term?: number; archived?: boolean; newCode?: boolean }): ClassInfo {
+  const c = classById(id);
+  if (!c) throw new ProfileError('ไม่พบห้องนี้');
+  const year = patch.year ?? c.year;
+  const term = patch.term ?? c.term;
+  const name = checkClass(patch.name ?? c.name, year, term, id);
+  // moving a class to a later term follows the same rule as creating one
+  if (year * 10 + term > c.year * 10 + c.term) {
+    const old = olderClasses(year, term, id);
+    if (old.length) throw new OldClassesError(old);
+  }
+  db.prepare('UPDATE classes SET name = ?, year = ?, term = ?, archived = ?, code = ? WHERE id = ?').run(
+    name,
+    year,
+    term,
+    +(patch.archived ?? c.archived),
+    patch.newCode ? randomCode() : c.code,
+    id,
+  );
+  return classById(id)!;
+}
+
+/**
+ * Deletes a class and wipes its students' work (solves, attempts, drafts, revealed
+ * answers) so a repeat student starts from zero next term. Accounts stay; they're
+ * left with no class and must join a new one. A copy of the database is saved to
+ * data/backups/ first, since this can't be undone. Returns how many students were wiped.
+ */
+export function deleteClass(id: number): { wiped: number; backup: string | null } {
+  const c = classById(id);
+  if (!c) throw new ProfileError('ไม่พบห้องนี้');
+  const ids = (db.prepare("SELECT id FROM users WHERE class_id = ? AND role = 'student'").all(id) as { id: number }[]).map((r) => r.id);
+  const saved = ids.length ? backup(`before-delete-class-${id}-${new Date().toISOString().replace(/[:.]/g, '-')}`) : null;
+  db.exec('BEGIN');
+  try {
+    for (const t of ['solves', 'attempts', 'drafts', 'reveals']) db.prepare(`DELETE FROM ${t} WHERE user_id IN (SELECT id FROM users WHERE class_id = ? AND role = 'student')`).run(id);
+    db.prepare('UPDATE users SET class_id = NULL WHERE class_id = ?').run(id);
+    db.prepare('DELETE FROM roster WHERE class_id = ?').run(id);
+    db.prepare('DELETE FROM classes WHERE id = ?').run(id);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  return { wiped: ids.length, backup: saved };
+}
+
+export interface ClassRow extends ClassInfo {
+  /** students in the class now */
+  students: number;
+  /** listed by the teacher, waiting for their first sign-in */
+  pending: number;
+  /** problems assigned to the class */
+  assigned: number;
+}
+
+/** Newest term first. */
+export function listClasses(): ClassRow[] {
+  return (
+    db
+      .prepare(
+        `SELECT c.*, (SELECT COUNT(*) FROM users u WHERE u.class_id = c.id AND u.role = 'student') AS students,
+                (SELECT COUNT(*) FROM roster r WHERE r.class_id = c.id) AS pending,
+                (SELECT COUNT(*) FROM assignments a WHERE a.class_id = c.id) AS assigned
+         FROM classes c ORDER BY c.year DESC, c.term DESC, c.name`,
+      )
+      .all() as unknown as (ClassDb & { students: number; pending: number; assigned: number })[]
+  ).map((r) => ({ ...toClass(r), students: r.students, pending: r.pending, assigned: r.assigned }));
+}
+
+// ---------- roster: the teacher's list of who is in a class ----------
+
+/** A student id without dashes, or a lower-case email; null when it's neither. */
+export function rosterIdent(raw: string): string | null {
+  const s = raw.trim();
+  if (s.includes('@')) return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s) ? s.toLowerCase() : null;
+  const digits = s.replace(/-/g, '');
+  return /^\d{6,20}$/.test(digits) ? digits : null;
+}
+
+export interface RosterResult {
+  /** existing accounts moved into the class now */
+  moved: string[];
+  /** already in this class */
+  already: number;
+  /** no account yet: placed in the class on their first sign-in */
+  pending: number;
+  /** lines that are neither a student id nor an email */
+  invalid: string[];
+}
+
+/** Adds a pasted list (student ids or emails, one per line or comma separated) to a class. */
+export function addRoster(classId: number, text: string): RosterResult {
+  const c = classById(classId);
+  if (!c) throw new ProfileError('ไม่พบห้องนี้');
+  if (c.archived) throw new ProfileError('ห้องนี้ปิดแล้ว — เปิดห้องอีกครั้งก่อนเพิ่มรายชื่อ');
+  const out: RosterResult = { moved: [], already: 0, pending: 0, invalid: [] };
+  const seen = new Set<string>();
+  const find = db.prepare("SELECT id, name, class_id FROM users WHERE role = 'student' AND (REPLACE(student_id, '-', '') = ? OR email = ?)");
+  db.exec('BEGIN');
+  try {
+    for (const raw of text.split(/[\s,;]+/)) {
+      if (!raw) continue;
+      const ident = rosterIdent(raw);
+      if (!ident) {
+        if (out.invalid.length < 20) out.invalid.push(raw.slice(0, 40));
+        continue;
+      }
+      if (seen.has(ident)) continue;
+      seen.add(ident);
+      const u = find.get(ident, ident) as { id: number; name: string; class_id: number | null } | undefined;
+      if (u) {
+        db.prepare('DELETE FROM roster WHERE ident = ?').run(ident);
+        if (u.class_id === classId) out.already++;
+        else {
+          setUserClass(u.id, classId);
+          out.moved.push(u.name);
+        }
+      } else {
+        db.prepare('INSERT INTO roster (ident, class_id, added_at) VALUES (?, ?, ?) ON CONFLICT(ident) DO UPDATE SET class_id = excluded.class_id, added_at = excluded.added_at').run(
+          ident,
+          classId,
+          Date.now(),
+        );
+        out.pending++;
+      }
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  return out;
+}
+
+/** Puts a student into the class a teacher listed them in (by student id or email), if any. */
+export function claimRoster(userId: number): boolean {
+  const u = db.prepare("SELECT student_id, email FROM users WHERE id = ? AND role = 'student'").get(userId) as { student_id: string; email: string | null } | undefined;
+  if (!u) return false;
+  const idents = [rosterIdent(u.student_id), u.email?.toLowerCase() ?? null].filter((x): x is string => !!x);
+  if (!idents.length) return false;
+  const marks = idents.map(() => '?').join(', ');
+  const r = db
+    .prepare(`SELECT r.class_id FROM roster r JOIN classes c ON c.id = r.class_id WHERE r.ident IN (${marks}) AND c.archived = 0 ORDER BY r.added_at DESC LIMIT 1`)
+    .get(...idents) as { class_id: number } | undefined;
+  db.prepare(`DELETE FROM roster WHERE ident IN (${marks})`).run(...idents);
+  if (!r) return false;
+  setUserClass(userId, r.class_id);
+  return true;
+}
+
+/** Moves a student into a class (null = none). */
+export function setUserClass(userId: number, classId: number | null) {
+  if (classId != null && !classById(classId)) throw new ProfileError('ไม่พบห้องนี้');
+  db.prepare("UPDATE users SET class_id = ? WHERE id = ? AND role = 'student'").run(classId, userId);
+}
+
+/** A student entering a join code. Throws ProfileError when the code is wrong or the class is closed. */
+export function joinClass(userId: number, code: string): ClassInfo {
+  const r = db.prepare('SELECT * FROM classes WHERE code = ?').get(code.trim().toUpperCase().replace(/[\s-]/g, '')) as ClassDb | undefined;
+  if (!r) throw new ProfileError('ไม่พบห้องเรียนรหัสนี้ — ตรวจรหัสที่อาจารย์ให้อีกครั้ง');
+  if (r.archived) throw new ProfileError('ห้องนี้ปิดรับแล้ว — ติดต่ออาจารย์');
+  setUserClass(userId, r.id);
+  return toClass(r);
+}
+
+/** For the CLI: put a student (by student id) into the class with this join code. */
+export function setClassByCode(studentId: string, code: string): ClassInfo | null {
+  const u = db.prepare('SELECT id FROM users WHERE student_id = ?').get(studentId) as { id: number } | undefined;
+  if (!u) return null;
+  return joinClass(u.id, code);
 }
 
 export interface UserRow extends User {
   points: number;
   passed: number;
   last_active: number | null;
+  /** problems set for their class */
+  assigned: number;
+  /** of those, solved by the deadline */
+  on_time: number;
 }
 
 /** Everyone with their all-time score and last attempt, for the teacher page. */
 export function listUsers(): UserRow[] {
   return db
     .prepare(
-      `SELECT u.id, u.student_id, u.name, u.section, u.role, u.email,
+      `SELECT ${userColsOf('u')},
               (SELECT COALESCE(SUM(points), 0) FROM solves WHERE user_id = u.id) AS points,
               (SELECT COUNT(*) FROM solves WHERE user_id = u.id) AS passed,
-              (SELECT MAX(created_at) FROM attempts WHERE user_id = u.id) AS last_active
+              (SELECT MAX(created_at) FROM attempts WHERE user_id = u.id) AS last_active,
+              (SELECT COUNT(*) FROM assignments a WHERE a.class_id = u.class_id) AS assigned,
+              (SELECT COUNT(*) FROM assignments a JOIN solves s ON s.problem_id = a.problem_id AND s.user_id = u.id
+                WHERE a.class_id = u.class_id AND s.solved_at <= a.due_at) AS on_time
        FROM users u
-       ORDER BY u.role DESC, u.section, u.student_id`,
+       ORDER BY u.role DESC, section, u.student_id`,
     )
     .all() as unknown as UserRow[];
 }
@@ -301,17 +582,18 @@ export function logout(token: string) {
   db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
 }
 
-/** Pre-registers a student so their Google email lands on this student id and section. */
-export function addUser(studentId: string, name: string, section: string, email: string | null, role: Role = 'student') {
-  db.prepare('INSERT INTO users (student_id, name, section, pw_hash, role, created_at, email) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+/** Pre-registers a student so their Google email lands on this student id (and the class with this join code, if given). */
+export function addUser(studentId: string, name: string, classCode: string, email: string | null, role: Role = 'student') {
+  const r = db.prepare('INSERT INTO users (student_id, name, section, pw_hash, role, created_at, email) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
     studentId,
     name,
-    section,
+    '',
     '!google',
     role,
     Date.now(),
     email?.toLowerCase() ?? null,
   );
+  if (classCode && role === 'student') joinClass(Number(r.lastInsertRowid), classCode);
 }
 
 // ---------- problems ----------
@@ -375,16 +657,17 @@ export function pointsFor(userId: number, pid: number): { points: number; firstT
   return { points: base + (firstTry ? FIRST_TRY_BONUS : 0), firstTry, revealed };
 }
 
-export function markSolved(userId: number, pid: number): number | null {
+export function markSolved(userId: number, pid: number, code: string | null = null): number | null {
   if (solve(userId, pid)) return null;
   const { points, firstTry, revealed } = pointsFor(userId, pid);
-  db.prepare('INSERT INTO solves (user_id, problem_id, points, first_try, revealed, solved_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+  db.prepare('INSERT INTO solves (user_id, problem_id, points, first_try, revealed, solved_at, code) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
     userId,
     pid,
     points,
     +firstTry,
     +revealed,
     Date.now(),
+    code,
   );
   return points;
 }
@@ -419,31 +702,31 @@ export function periodStart(period: Period, now = new Date()): number {
 export interface RankRow {
   id: number;
   name: string;
-  section: string;
   passed: number;
   points: number;
   rank: number;
 }
 
-export function ranking(from: number, to = Infinity, section?: string): RankRow[] {
+/** Students ranked by points solved in [from, to); with classId, only students in that class. */
+export function ranking(from: number, to = Infinity, classId?: number | null): RankRow[] {
   const rows = db
     .prepare(
-      `SELECT u.id, u.name, u.section,
+      `SELECT u.id, u.name,
               COUNT(s.problem_id) AS passed,
               COALESCE(SUM(s.points), 0) AS points,
               COALESCE(MAX(s.solved_at), 0) AS last
        FROM users u LEFT JOIN solves s ON s.user_id = u.id AND s.solved_at >= ? AND s.solved_at < ?
-       WHERE u.role = 'student' ${section ? 'AND u.section = ?' : ''}
+       WHERE u.role = 'student' ${classId != null ? 'AND u.class_id = ?' : ''}
        GROUP BY u.id`,
     )
-    .all(...([from, to === Infinity ? Number.MAX_SAFE_INTEGER : to, ...(section ? [section] : [])] as number[])) as (Omit<RankRow, 'rank'> & {
+    .all(...([from, to === Infinity ? Number.MAX_SAFE_INTEGER : to, ...(classId != null ? [classId] : [])] as number[])) as (Omit<RankRow, 'rank'> & {
     last: number;
   })[];
   rows.sort((a, b) => b.points - a.points || b.passed - a.passed || a.last - b.last || a.name.localeCompare(b.name, 'th'));
   let rank = 0;
   return rows.map((r, i) => {
     if (i === 0 || r.points !== rows[i - 1].points || r.passed !== rows[i - 1].passed) rank = i + 1;
-    return { id: r.id, name: r.name, section: r.section, passed: r.passed, points: r.points, rank };
+    return { id: r.id, name: r.name, passed: r.passed, points: r.points, rank };
   });
 }
 
@@ -487,4 +770,227 @@ export function initials(name: string): string {
 
 export function userCount(): number {
   return (db.prepare('SELECT COUNT(*) AS n FROM users').get() as { n: number }).n;
+}
+
+// ---------- assignments: problems set for a class, with deadlines ----------
+
+export interface Assignment {
+  problemId: number;
+  dueAt: number;
+}
+
+export function assignments(classId: number): Assignment[] {
+  return (db.prepare('SELECT problem_id, due_at FROM assignments WHERE class_id = ? ORDER BY due_at, problem_id').all(classId) as { problem_id: number; due_at: number }[]).map(
+    (r) => ({ problemId: r.problem_id, dueAt: r.due_at }),
+  );
+}
+
+/** Replaces a class's assignments with this list. */
+export function setAssignments(classId: number, list: Assignment[]) {
+  if (!classById(classId)) throw new ProfileError('ไม่พบห้องนี้');
+  const seen = new Set<number>();
+  for (const a of list) {
+    if (!problemById(a.problemId)) throw new ProfileError(`ไม่พบโจทย์ข้อ ${a.problemId}`);
+    if (!Number.isFinite(a.dueAt) || a.dueAt <= 0) throw new ProfileError(`กรุณาใส่กำหนดส่งของโจทย์ข้อ ${a.problemId}`);
+    if (seen.has(a.problemId)) throw new ProfileError(`โจทย์ข้อ ${a.problemId} ซ้ำ`);
+    seen.add(a.problemId);
+  }
+  db.exec('BEGIN');
+  try {
+    db.prepare('DELETE FROM assignments WHERE class_id = ?').run(classId);
+    const ins = db.prepare('INSERT INTO assignments (class_id, problem_id, due_at) VALUES (?, ?, ?)');
+    for (const a of list) ins.run(classId, a.problemId, a.dueAt);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+
+/** problem id → deadline, for the student's current class. */
+export function dueMap(user: User): Map<number, number> {
+  return new Map(user.class_id == null ? [] : assignments(user.class_id).map((a) => [a.problemId, a.dueAt]));
+}
+
+// ---------- teacher views: one student's progress, per-problem stats, similar code ----------
+
+export interface ProblemProgress {
+  id: number;
+  title: string;
+  level: string;
+  status: Status;
+  points: number | null;
+  solvedAt: number | null;
+  firstTry: boolean;
+  /** submits + test runs */
+  attempts: number;
+  /** last run: tests passed / total */
+  last: { passed: number; total: number; at: number } | null;
+  dueAt: number | null;
+}
+
+export function progress(userId: number): ProblemProgress[] {
+  const user = userById(userId);
+  if (!user) throw new ProfileError('ไม่พบบัญชีนี้');
+  const st = statuses(userId);
+  const due = dueMap(user);
+  const solves = new Map(
+    (db.prepare('SELECT problem_id, points, first_try, solved_at FROM solves WHERE user_id = ?').all(userId) as {
+      problem_id: number;
+      points: number;
+      first_try: number;
+      solved_at: number;
+    }[]).map((r) => [r.problem_id, r]),
+  );
+  const tries = new Map(
+    (db.prepare('SELECT problem_id, COUNT(*) AS n FROM attempts WHERE user_id = ? GROUP BY problem_id').all(userId) as { problem_id: number; n: number }[]).map((r) => [
+      r.problem_id,
+      r.n,
+    ]),
+  );
+  return PROBLEMS.map((p) => {
+    const s = solves.get(p.id);
+    const a = lastAttempt(userId, p.id);
+    return {
+      id: p.id,
+      title: p.title,
+      level: p.level,
+      status: st.get(p.id)?.st ?? 'todo',
+      points: s?.points ?? null,
+      solvedAt: s?.solved_at ?? null,
+      firstTry: !!s?.first_try,
+      attempts: tries.get(p.id) ?? 0,
+      last: a ? { passed: a.passed, total: a.total, at: a.created_at } : null,
+      dueAt: due.get(p.id) ?? null,
+    };
+  });
+}
+
+export interface ProblemStat {
+  id: number;
+  title: string;
+  level: string;
+  /** students (of the given ones) who ran or submitted it */
+  attempted: number;
+  solved: number;
+}
+
+/** How a group of students is doing on each problem. */
+export function problemStats(userIds: number[]): { students: number; problems: ProblemStat[] } {
+  const ids = userIds.filter(Number.isInteger);
+  const counts = (sql: string) => {
+    const m = new Map<number, number>();
+    if (!ids.length) return m;
+    const rows = db.prepare(sql.replace('$IDS', ids.map(() => '?').join(','))).all(...ids) as { problem_id: number; n: number }[];
+    for (const r of rows) m.set(r.problem_id, r.n);
+    return m;
+  };
+  const attempted = counts('SELECT problem_id, COUNT(DISTINCT user_id) AS n FROM attempts WHERE user_id IN ($IDS) GROUP BY problem_id');
+  const solved = counts('SELECT problem_id, COUNT(*) AS n FROM solves WHERE user_id IN ($IDS) GROUP BY problem_id');
+  return {
+    students: ids.length,
+    problems: PROBLEMS.map((p) => ({ id: p.id, title: p.title, level: p.level, attempted: attempted.get(p.id) ?? 0, solved: solved.get(p.id) ?? 0 })),
+  };
+}
+
+export interface SimilarPair {
+  problem: { id: number; title: string };
+  a: { id: number; name: string; studentId: string; code: string };
+  b: { id: number; name: string; studentId: string; code: string };
+  similarity: number;
+}
+
+/** Nearly identical passing code between the given students (solves saved before code was kept fall back to their last draft). */
+export function similarCode(userIds: number[], threshold = 0.85): SimilarPair[] {
+  const ids = userIds.filter(Number.isInteger);
+  if (ids.length < 2) return [];
+  const rows = db
+    .prepare(
+      `SELECT s.user_id, s.problem_id, COALESCE(s.code, d.code) AS code, u.name, u.student_id
+       FROM solves s JOIN users u ON u.id = s.user_id LEFT JOIN drafts d ON d.user_id = s.user_id AND d.problem_id = s.problem_id
+       WHERE s.user_id IN (${ids.map(() => '?').join(',')})`,
+    )
+    .all(...ids) as { user_id: number; problem_id: number; code: string | null; name: string; student_id: string }[];
+  const key = (u: number, p: number) => `${u}:${p}`;
+  const byKey = new Map(rows.map((r) => [key(r.user_id, r.problem_id), r]));
+  const pairs = findSimilar(
+    rows.filter((r) => r.code).map((r) => ({ userId: r.user_id, problemId: r.problem_id, code: r.code! })),
+    threshold,
+  );
+  return pairs.slice(0, 200).map((p) => {
+    const x = byKey.get(key(p.a, p.problemId))!;
+    const y = byKey.get(key(p.b, p.problemId))!;
+    return {
+      problem: { id: p.problemId, title: problemById(p.problemId)?.title ?? `#${p.problemId}` },
+      a: { id: x.user_id, name: x.name, studentId: x.student_id, code: x.code! },
+      b: { id: y.user_id, name: y.name, studentId: y.student_id, code: y.code! },
+      similarity: p.similarity,
+    };
+  });
+}
+
+// ---------- audit log ----------
+
+export function audit(actor: User, action: string, detail: string) {
+  db.prepare('INSERT INTO audit (at, actor, action, detail) VALUES (?, ?, ?, ?)').run(Date.now(), `${actor.name} (${actor.student_id})`, action, detail);
+}
+
+export function auditLog(limit = 100): { at: number; actor: string; action: string; detail: string }[] {
+  return db.prepare('SELECT at, actor, action, detail FROM audit ORDER BY id DESC LIMIT ?').all(limit) as { at: number; actor: string; action: string; detail: string }[];
+}
+
+// ---------- backups ----------
+
+const BACKUP_DIR = resolve(dirname(DB_PATH), 'backups');
+
+/** Copies the database to data/backups/<name>.db (consistent even while in use). */
+export function backup(name: string): string {
+  mkdirSync(BACKUP_DIR, { recursive: true });
+  const file = resolve(BACKUP_DIR, `${name}.db`);
+  try {
+    unlinkSync(file);
+  } catch {
+    /* not there yet */
+  }
+  db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
+  return file;
+}
+
+/** One backup per day (daily-YYYY-MM-DD.db), keeping the newest `keep`. Returns the file when one was made. */
+export function dailyBackup(keep = 14, now = new Date()): string | null {
+  const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  mkdirSync(BACKUP_DIR, { recursive: true });
+  const daily = readdirSync(BACKUP_DIR)
+    .filter((f) => /^daily-\d{4}-\d{2}-\d{2}\.db$/.test(f))
+    .sort();
+  const made = daily.includes(`daily-${day}.db`) ? null : backup(`daily-${day}`);
+  const all = made ? [...daily, `daily-${day}.db`] : daily;
+  for (const f of all.slice(0, Math.max(0, all.length - keep))) unlinkSync(resolve(BACKUP_DIR, f));
+  return made;
+}
+
+// ---------- one-time migration: free-text sections → classes ----------
+
+if (needsClassMigration) {
+  db.exec('BEGIN');
+  try {
+    db.exec('ALTER TABLE users ADD COLUMN class_id INTEGER REFERENCES classes(id) ON DELETE SET NULL');
+    // each old section becomes a class in the term its first student signed up
+    const old = db.prepare("SELECT section, MIN(created_at) AS at FROM users WHERE role = 'student' AND TRIM(section) != '' GROUP BY section").all() as {
+      section: string;
+      at: number;
+    }[];
+    for (const o of old) {
+      const { year, term } = termOf(o.at);
+      const name = o.section.trim().replace(/\s+/g, ' ').slice(0, 40);
+      const same = db.prepare('SELECT id FROM classes WHERE name = ? AND year = ? AND term = ?').get(name, year, term) as { id: number } | undefined;
+      const id = same?.id ?? insertClass(name, year, term).id;
+      db.prepare("UPDATE users SET class_id = ? WHERE role = 'student' AND section = ?").run(id, o.section);
+    }
+    db.exec('COMMIT');
+    if (old.length) console.log(`ย้ายกลุ่มเรียนเดิม ${old.length} กลุ่มไปเป็นห้องเรียนแล้ว — ดูรหัสเข้าห้องได้ที่หน้าอาจารย์`);
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
 }

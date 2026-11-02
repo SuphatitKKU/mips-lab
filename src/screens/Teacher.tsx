@@ -1,30 +1,40 @@
-import { useMemo, useState, type FormEvent } from 'react';
+import { useMemo, useRef, useState, type FormEvent } from 'react';
 import { Navigate } from 'react-router-dom';
 import { api, ApiError, useApi } from '../api';
 import { useAuth, type Me, type Role } from '../auth';
 import { Icon, ICON } from '../components/Icon';
 import { usePopup } from '../components/Popup';
 import { ErrorBox, PageHeader, Segmented, Skeleton } from '../components/ui';
+import { exportCsv, exportDocx, exportPdf, type ExportInfo, type ExportRow } from '../components/exportList';
+import { useLive, type LiveStatus } from '../components/live';
+import { classLabel } from '../lib/terms';
 import { RoleChip } from './Settings';
+import { byYear, ClassesPanel, ClassExport, type ClassRow, type ExportKind } from './TeacherClasses';
+import { AuditPanel, ProgressModal, SimilarPanel, StatsPanel } from './TeacherInsights';
 
 interface UserRow extends Me {
   id: number;
   points: number;
   passed: number;
   lastActive: number | null;
+  /** problems assigned to their class / solved by the deadline */
+  assigned: number;
+  onTime: number;
 }
 interface Data {
-  sections: string[];
+  classes: ClassRow[];
   users: UserRow[];
+  totalProblems: number;
 }
 
 // name, id, section, [role], passed, points, last active, edit
-const colsFor = (withRole: boolean) => `minmax(200px, 1.6fr) 130px 100px ${withRole ? '96px ' : ''}64px 76px 110px 44px`;
+// name, id, section, [role], passed, assignments on time, points, last active, edit
+const colsFor = (withRole: boolean) => `minmax(200px, 1.6fr) 130px 150px ${withRole ? '96px ' : ''}64px 64px 76px 110px 44px`;
 const PAGE = 50;
 
-type SortKey = 'name' | 'studentId' | 'section' | 'passed' | 'points' | 'lastActive';
-const SORT_LABEL: Record<SortKey, string> = { name: 'ชื่อ', studentId: 'รหัส', section: 'กลุ่ม', passed: 'ผ่าน', points: 'คะแนน', lastActive: 'ใช้งานล่าสุด' };
-const NUMERIC: SortKey[] = ['passed', 'points', 'lastActive'];
+type SortKey = 'name' | 'studentId' | 'section' | 'passed' | 'onTime' | 'points' | 'lastActive';
+const SORT_LABEL: Record<SortKey, string> = { name: 'ชื่อ', studentId: 'รหัส', section: 'ห้อง', passed: 'ผ่าน', onTime: 'งาน', points: 'คะแนน', lastActive: 'ใช้งานล่าสุด' };
+const NUMERIC: SortKey[] = ['passed', 'onTime', 'points', 'lastActive'];
 
 function SortHead({ k, sort, onSort, right }: { k: SortKey; sort: { key: SortKey; dir: 1 | -1 } | null; onSort: (k: SortKey) => void; right?: boolean }) {
   const on = sort?.key === k;
@@ -52,20 +62,63 @@ function ago(t: number | null): string {
 export function Teacher() {
   const { isTeacher } = useAuth();
   const { data, error, reload, setData } = useApi<Data>(isTeacher ? '/teacher/users' : null);
+  // live: the server nudges over WebSocket when students do something; re-fetch quietly
+  // (no loading state, so rows being edited stay put). One request at a time, one queued.
+  const fetching = useRef(false);
+  const queued = useRef(false);
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+  // bumps on every live refresh so the open panels (stats, history) refetch too
+  const [version, setVersion] = useState(0);
+  const [viewing, setViewing] = useState<number | null>(null);
+  const refresh = useRef(() => {});
+  refresh.current = () => {
+    if (fetching.current) {
+      queued.current = true;
+      return;
+    }
+    fetching.current = true;
+    api<Data>('/teacher/users')
+      .then((d) => {
+        setData(d);
+        setUpdatedAt(Date.now());
+        setVersion((v) => v + 1);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        fetching.current = false;
+        if (queued.current) {
+          queued.current = false;
+          refresh.current();
+        }
+      });
+  };
+  const live = useLive(isTeacher, () => refresh.current());
   const [q, setQ] = useState('');
-  const [section, setSection] = useState('');
+  // '' everyone · 'none' no class · 'y:2569' a whole academic year · 'c:3' one class
+  const [klass, setKlass] = useState('');
   const [role, setRole] = useState<'all' | Role>('student');
   const [editing, setEditing] = useState<number | null>(null);
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 } | null>(null);
   const [shown, setShown] = useState(PAGE);
   const [adding, setAdding] = useState(false);
 
+  const inClass = useMemo(() => {
+    const yearOf = new Map((data?.classes ?? []).map((c) => [c.id, c.year]));
+    return (u: UserRow) => {
+      if (!klass) return true;
+      if (u.role !== 'student') return false;
+      if (klass === 'none') return u.classId == null;
+      const n = Number(klass.slice(2));
+      return klass.startsWith('y:') ? u.classId != null && yearOf.get(u.classId) === n : u.classId === n;
+    };
+  }, [data, klass]);
+
   const rows = useMemo(() => {
     const needle = q.trim().toLowerCase();
     const list = (data?.users ?? []).filter(
       (u) =>
         (role === 'all' || u.role === role) &&
-        (!section || u.section === section) &&
+        inClass(u) &&
         (!needle || [u.name, u.studentId, u.email ?? ''].some((s) => s.toLowerCase().includes(needle))),
     );
     if (!sort) return list;
@@ -75,7 +128,7 @@ export function Teacher() {
       const y = val(b);
       return (typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y), 'th')) * sort.dir;
     });
-  }, [data, q, section, role, sort]);
+  }, [data, q, inClass, role, sort]);
 
   // numbers start biggest-first, text A→Z; clicking the same column again flips it
   const onSort = (k: SortKey) => setSort((s) => (s?.key === k ? { key: k, dir: s.dir === 1 ? -1 : 1 } : { key: k, dir: NUMERIC.includes(k) ? -1 : 1 }));
@@ -85,14 +138,76 @@ export function Teacher() {
 
   if (!isTeacher) return <Navigate to="/" replace />;
 
-  const students = data?.users.filter((u) => u.role === 'student') ?? [];
+  const toExport = (list: UserRow[]): ExportRow[] =>
+    list
+      .filter((u) => u.role === 'student')
+      .sort((a, b) => a.studentId.localeCompare(b.studentId, 'th', { numeric: true }))
+      .map((u) => ({ studentId: u.studentId, name: u.name, section: u.section, passed: u.passed, points: u.points, onTime: u.onTime, assigned: u.assigned }));
+
+  /** One class's scores (the delete dialog asks for this before wiping them). */
+  const exportClass = async (classId: number, kind: ExportKind) => {
+    const cls = data?.classes.find((c) => c.id === classId);
+    const info: ExportInfo = { title: cls ? classLabel(cls) : 'ห้องเรียน', totalProblems: data?.totalProblems ?? 0, rows: toExport((data?.users ?? []).filter((u) => u.classId === classId)) };
+    await (kind === 'csv' ? Promise.resolve(exportCsv(info)) : kind === 'docx' ? exportDocx(info) : exportPdf(info));
+  };
+
+  /** Students on screen right now (for the stats and similar-code panels). */
+  const shownStudentIds = rows.filter((u) => u.role === 'student').map((u) => u.id);
+
+  /** What's on screen (students only, current filters), ordered by student id, for Excel / Word / PDF. */
+  const exportInfo = (): ExportInfo => {
+    const cls = klass.startsWith('c:') ? data?.classes.find((c) => c.id === Number(klass.slice(2))) : undefined;
+    const title = !klass ? 'ทุกห้อง' : klass === 'none' ? 'ยังไม่ได้เข้าห้อง' : klass.startsWith('y:') ? `ปีการศึกษา ${klass.slice(2)}` : cls ? classLabel(cls) : 'ห้องเรียน';
+    return {
+      title,
+      note: q.trim() ? `ค้นหา: "${q.trim()}"` : undefined,
+      totalProblems: data?.totalProblems ?? 0,
+      rows: toExport(rows),
+    };
+  };
+
+  // the summary follows the class filter
+  const allStudents = data?.users.filter((u) => u.role === 'student') ?? [];
+  const students = allStudents.filter(inClass);
   const weekAgo = Date.now() - 7 * 86400000;
   const stats: [string, string | number][] = [
     ['นักศึกษา', students.length],
-    ['อาจารย์', (data?.users.length ?? 0) - students.length],
+    ['อาจารย์', (data?.users.length ?? 0) - allStudents.length],
     ['เข้าใช้ 7 วันนี้', students.filter((u) => (u.lastActive ?? 0) >= weekAgo).length],
     ['ผ่านเฉลี่ย (ข้อ)', students.length ? (students.reduce((s, u) => s + u.passed, 0) / students.length).toFixed(1) : '0'],
   ];
+
+  const showClass = (f: string) => {
+    setKlass(f);
+    setRole('student');
+    setShown(PAGE);
+    document.getElementById('teacher-list')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  const onClassSaved = (c: ClassRow) =>
+    setData((d) => {
+      if (!d) return d;
+      const known = d.classes.some((x) => x.id === c.id);
+      const classes = known ? d.classes.map((x) => (x.id === c.id ? c : x)) : [c, ...d.classes];
+      classes.sort((a, b) => b.year - a.year || b.term - a.term || a.name.localeCompare(b.name, 'th'));
+      // a renamed class changes the label shown on its students
+      const users = d.users.map((u) => (u.classId === c.id ? { ...u, section: classLabel(c) } : u));
+      return { ...d, classes, users };
+    });
+
+  const onClassDeleted = (id: number) => {
+    setData((d) =>
+      d && {
+        ...d,
+        classes: d.classes.filter((c) => c.id !== id),
+        users: d.users.map((u) =>
+          // the server wiped their work along with the class
+          u.classId === id ? { ...u, classId: null, needsClass: true, section: '', points: 0, passed: 0, lastActive: null } : u,
+        ),
+      },
+    );
+    // a filter pointing at the deleted class would show nothing
+    if (klass === `c:${id}`) setKlass('');
+  };
 
   const onSaved = (u: UserRow) => {
     setData((d) => (d ? { ...d, users: d.users.map((x) => (x.id === u.id ? { ...x, ...u } : x)) } : d));
@@ -101,7 +216,8 @@ export function Teacher() {
 
   return (
     <>
-      <PageHeader title="อาจารย์" sub="ดูความคืบหน้านักศึกษา จัดกลุ่มเรียน และจัดการบัญชีอาจารย์">
+      <PageHeader title="อาจารย์" sub="ดูความคืบหน้านักศึกษา จัดห้องเรียนแยกตามภาคเรียน และจัดการบัญชีอาจารย์">
+        <LiveBadge status={live} updatedAt={updatedAt} />
         <button className="btn btn-primary" style={{ height: 44, gap: 8 }} onClick={() => setAdding(true)} disabled={adding}>
           <Icon d={ICON.user} size={18} />
           เพิ่มอาจารย์
@@ -109,6 +225,12 @@ export function Teacher() {
       </PageHeader>
       <main className="main">
         {error && <ErrorBox error={error} onRetry={reload} />}
+
+        {data && (
+          <ClassExport.Provider value={exportClass}>
+            <ClassesPanel classes={data.classes} unassigned={allStudents.filter((u) => u.classId == null).length} onSaved={onClassSaved} onDeleted={onClassDeleted} onRoster={reload} onShow={showClass} />
+          </ClassExport.Provider>
+        )}
 
         <section aria-label="สรุป" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 16 }}>
           {stats.map(([label, value]) => (
@@ -134,19 +256,26 @@ export function Teacher() {
             />
           </label>
           <select
-            aria-label="กลุ่มเรียน"
+            aria-label="ห้องเรียน"
             className="select-pill"
-            value={section}
+            value={klass}
             onChange={(e) => {
-              setSection(e.target.value);
+              setKlass(e.target.value);
               setShown(PAGE);
             }}
           >
-            <option value="">ทุกกลุ่ม</option>
-            {data?.sections.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
+            <option value="">ทุกห้อง</option>
+            <option value="none">ยังไม่ได้เข้าห้อง</option>
+            {byYear(data?.classes ?? []).map(([year, cs]) => (
+              <optgroup key={year} label={`ปีการศึกษา ${year}`}>
+                <option value={`y:${year}`}>ทั้งปี {year}</option>
+                {cs.map((c) => (
+                  <option key={c.id} value={`c:${c.id}`}>
+                    {classLabel(c)}
+                    {c.archived ? ' (ปิดแล้ว)' : ''}
+                  </option>
+                ))}
+              </optgroup>
             ))}
           </select>
           <Segmented
@@ -162,6 +291,7 @@ export function Teacher() {
               { value: 'all', label: 'ทั้งหมด' },
             ]}
           />
+          <ExportButtons get={exportInfo} disabled={!data} />
         </section>
 
         {adding && (
@@ -175,14 +305,15 @@ export function Teacher() {
           />
         )}
 
-        <section aria-label="รายชื่อ" className="card" style={{ padding: 10, overflowX: 'auto' }}>
-          <div style={{ minWidth: withRole ? 900 : 792 }}>
+        <section id="teacher-list" aria-label="รายชื่อ" className="card" style={{ padding: 10, overflowX: 'auto' }}>
+          <div style={{ minWidth: withRole ? 1020 : 912 }}>
             <div style={{ display: 'grid', gridTemplateColumns: COLS, gap: 12, padding: '12px 16px 8px', fontSize: 13, color: 'var(--muted)' }}>
               <SortHead k="name" sort={sort} onSort={onSort} />
               <SortHead k="studentId" sort={sort} onSort={onSort} />
               <SortHead k="section" sort={sort} onSort={onSort} />
               {withRole && <span>บทบาท</span>}
               <SortHead k="passed" sort={sort} onSort={onSort} right />
+              <SortHead k="onTime" sort={sort} onSort={onSort} right />
               <SortHead k="points" sort={sort} onSort={onSort} right />
               <SortHead k="lastActive" sort={sort} onSort={onSort} />
               <span />
@@ -192,7 +323,7 @@ export function Teacher() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
               {rows.slice(0, shown).map((u) =>
                 editing === u.id ? (
-                  <EditRow key={u.id} u={u} sections={data?.sections ?? []} onCancel={() => setEditing(null)} onSaved={onSaved} />
+                  <EditRow key={u.id} u={u} classes={data?.classes ?? []} onCancel={() => setEditing(null)} onSaved={onSaved} />
                 ) : (
                   <div key={u.id} style={{ display: 'grid', gridTemplateColumns: COLS, alignItems: 'center', gap: 12, padding: '10px 16px', borderRadius: 16 }}>
                     <span style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
@@ -213,20 +344,31 @@ export function Teacher() {
                         {u.initials}
                       </span>
                       <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                        <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{u.name}</span>
+                        {u.role === 'student' ? (
+                          <button type="button" className="name-link" onClick={() => setViewing(u.id)} title="ดูความคืบหน้ารายข้อ">
+                            {u.name}
+                          </button>
+                        ) : (
+                          <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{u.name}</span>
+                        )}
                         <span style={{ fontSize: 12, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{u.email ?? 'ยังไม่ผูก Google'}</span>
                       </span>
                     </span>
                     <span style={{ fontFamily: 'var(--mono)', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={u.studentId}>
                       {u.studentId}
                     </span>
-                    <span style={{ fontSize: 14 }}>{u.section || '—'}</span>
+                    <span style={{ fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={u.section}>
+                      {u.section || (u.role === 'student' ? <span style={{ color: 'var(--muted)' }}>ยังไม่เข้าห้อง</span> : '—')}
+                    </span>
                     {withRole && (
                       <span>
                         <RoleChip role={u.role} />
                       </span>
                     )}
                     <span style={num}>{u.passed}</span>
+                    <span style={{ ...num, color: u.assigned && u.onTime < u.assigned ? 'var(--warn-deep)' : undefined }} title={u.assigned ? `ส่งตรงเวลา ${u.onTime} จาก ${u.assigned} ข้อที่มอบหมาย` : 'ห้องนี้ยังไม่มีงานที่มอบหมาย'}>
+                      {u.assigned ? `${u.onTime}/${u.assigned}` : '—'}
+                    </span>
                     <span style={{ ...num, fontWeight: 600 }}>{u.points.toLocaleString()}</span>
                     <span style={{ fontSize: 13, color: 'var(--muted)' }}>{ago(u.lastActive)}</span>
                     <button className="btn btn-ghost btn-round" aria-label={`แก้ไข ${u.name}`} title="แก้ไข" onClick={() => setEditing(u.id)} style={{ width: 36, height: 36, padding: 0 }}>
@@ -247,11 +389,80 @@ export function Teacher() {
           )}
         </section>
 
+        <StatsPanel ids={shownStudentIds} version={version} />
+        <SimilarPanel ids={shownStudentIds} />
+        <AuditPanel version={version} />
+        {viewing != null && <ProgressModal userId={viewing} onClose={() => setViewing(null)} />}
+
         <p style={{ margin: 0, fontSize: 14, lineHeight: 1.7, color: 'var(--muted)' }}>
-          นักศึกษาเข้าด้วย Google (ระบบสร้างบัญชีให้เอง) · อาจารย์เข้าด้วยชื่อผู้ใช้และรหัสผ่าน · อาจารย์ไม่อยู่ในกระดานอันดับ และเปิดดูเฉลยได้ทุกข้อ (นักศึกษาดูได้หลังส่งผ่านข้อนั้นแล้ว)
+          นักศึกษาเข้าด้วย Google (ระบบสร้างบัญชีให้เอง) แล้วใส่รหัสเข้าห้อง · เปิดห้องเทอมใหม่ได้เมื่อลบห้องเทอมก่อนแล้ว และการลบห้องจะล้างคะแนนและโจทย์ของนักศึกษาในห้องนั้น (คนลงซ้ำเริ่มใหม่จากศูนย์) · อาจารย์เข้าด้วยชื่อผู้ใช้และรหัสผ่าน · อาจารย์ไม่อยู่ในกระดานอันดับ และเปิดดูเฉลยได้ทุกข้อ (นักศึกษาดูได้หลังส่งผ่านข้อนั้นแล้ว)
         </p>
       </main>
     </>
+  );
+}
+
+/** Excel / Word / PDF of the list as filtered on screen. */
+function ExportButtons({ get, disabled }: { get: () => ExportInfo; disabled: boolean }) {
+  const popup = usePopup();
+  const [busy, setBusy] = useState<ExportKind | null>(null);
+  const run = async (kind: ExportKind) => {
+    const info = get();
+    if (!info.rows.length) return popup.toast('ไม่มีนักศึกษาในรายการนี้ — ลองเปลี่ยนตัวกรอง', 'info');
+    setBusy(kind);
+    try {
+      if (kind === 'csv') {
+        exportCsv(info);
+        popup.toast(`ดาวน์โหลดไฟล์ Excel แล้ว (${info.rows.length} คน)`, 'ok');
+      } else if (kind === 'docx') {
+        await exportDocx(info);
+        popup.toast(`ดาวน์โหลดไฟล์ Word แล้ว (${info.rows.length} คน)`, 'ok');
+      } else await exportPdf(info);
+    } catch {
+      popup.toast('ส่งออกไม่สำเร็จ ลองใหม่อีกครั้ง', 'err');
+    } finally {
+      setBusy(null);
+    }
+  };
+  const btn = { height: 44, gap: 8 } as const;
+  return (
+    <span style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }} role="group" aria-label="ส่งออกรายชื่อ">
+      <button type="button" className="btn btn-secondary" style={btn} onClick={() => run('csv')} disabled={disabled || !!busy} aria-busy={busy === 'csv'} title="ไฟล์ .csv เปิดด้วย Excel / Google Sheets ได้">
+        <Icon d={ICON.download} size={17} />
+        Excel
+      </button>
+      <button type="button" className="btn btn-secondary" style={btn} onClick={() => run('docx')} disabled={disabled || !!busy} aria-busy={busy === 'docx'} title="ไฟล์ Word ตามตัวกรองที่เลือก">
+        <Icon d={ICON.download} size={17} />
+        Word
+      </button>
+      <button type="button" className="btn btn-secondary" style={btn} onClick={() => run('pdf')} disabled={disabled || !!busy} aria-busy={busy === 'pdf'} title="เปิดหน้าพิมพ์ แล้วเลือก 'บันทึกเป็น PDF'">
+        <Icon d={ICON.download} size={17} />
+        PDF
+      </button>
+    </span>
+  );
+}
+
+/** "สด" while the WebSocket is up; tells the teacher when it's reconnecting. */
+function LiveBadge({ status, updatedAt }: { status: LiveStatus; updatedAt: number | null }) {
+  const on = status === 'live';
+  const label = on ? 'สด' : status === 'offline' ? 'ขาดการเชื่อมต่อ — กำลังต่อใหม่' : 'กำลังเชื่อมต่อ…';
+  const time = updatedAt ? new Date(updatedAt).toLocaleTimeString('th-TH') : null;
+  return (
+    <span
+      className="stat-pill"
+      role="status"
+      title={on ? `รายชื่ออัปเดตเองทันทีที่นักศึกษาทำอะไร${time ? ` · ล่าสุด ${time}` : ''}` : 'รายชื่อจะไม่อัปเดตเองจนกว่าจะเชื่อมต่อได้'}
+      style={{ gap: 8, fontSize: 14 }}
+    >
+      <span
+        aria-hidden="true"
+        className={on ? 'live-dot' : undefined}
+        style={{ width: 9, height: 9, borderRadius: '50%', background: on ? 'var(--ok)' : status === 'offline' ? 'var(--err)' : 'var(--muted)' }}
+      />
+      {label}
+      {on && time && <span style={{ color: 'var(--muted)', fontFamily: 'var(--mono)', fontSize: 12 }}>{time}</span>}
+    </span>
   );
 }
 
@@ -324,22 +535,22 @@ function AddTeacher({ onCancel, onAdded }: { onCancel: () => void; onAdded: (u: 
   );
 }
 
-function EditRow({ u, sections, onCancel, onSaved }: { u: UserRow; sections: string[]; onCancel: () => void; onSaved: (u: UserRow) => void }) {
+function EditRow({ u, classes, onCancel, onSaved }: { u: UserRow; classes: ClassRow[]; onCancel: () => void; onSaved: (u: UserRow) => void }) {
   const popup = usePopup();
   const teacher = u.role === 'teacher';
   const [name, setName] = useState(u.name);
   const [studentId, setStudentId] = useState(u.studentId);
-  const [section, setSection] = useState(u.section);
+  const [classId, setClassId] = useState(u.classId == null ? '' : String(u.classId));
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
 
   const save = async (e: FormEvent) => {
     e.preventDefault();
-    const body: Record<string, string> = {};
+    const body: Record<string, string | number | null> = {};
     if (name.trim() !== u.name) body.name = name;
     if (studentId.trim() !== u.studentId) body.studentId = studentId;
-    if (!teacher && section.trim() !== u.section) body.section = section;
+    if (!teacher && classId !== (u.classId == null ? '' : String(u.classId))) body.classId = classId ? Number(classId) : null;
     if (teacher && password) body.password = password;
     if (!Object.keys(body).length) return onCancel();
     if (body.password && !(await popup.confirm({ title: 'ตั้งรหัสผ่านใหม่?', body: `${u.name} จะถูกออกจากระบบทุกเครื่อง และต้องใช้รหัสผ่านใหม่นี้`, ok: 'ตั้งรหัสผ่าน' }))) return;
@@ -375,11 +586,18 @@ function EditRow({ u, sections, onCancel, onSaved }: { u: UserRow; sections: str
           </label>
         ) : (
           <label className="field">
-            กลุ่มเรียน
-            <input className="input" style={small} value={section} onChange={(e) => setSection(e.target.value)} list="teacher-sections" maxLength={40} />
-            <datalist id="teacher-sections">
-              {sections.map((s) => <option key={s} value={s} />)}
-            </datalist>
+            ห้องเรียน
+            <select className="input" style={small} value={classId} onChange={(e) => setClassId(e.target.value)}>
+              <option value="">— ไม่อยู่ห้องใด —</option>
+              {classes
+                .filter((c) => !c.archived || c.id === u.classId)
+                .map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {classLabel(c)}
+                    {c.archived ? ' (ปิดแล้ว)' : ''}
+                  </option>
+                ))}
+            </select>
           </label>
         )}
       </div>

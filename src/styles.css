@@ -3860,3 +3860,98 @@ details.more summary {
   padding: 20px;
   color: var(--body-alt);
 }
+
+/* teacher page: live-update dot */
+.live-dot {
+  box-shadow: 0 0 0 0 var(--ok);
+  animation: live-pulse 2s ease-out infinite;
+}
+@keyframes live-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 55%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 7px transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-dot {
+    animation: none;
+  }
+}
+
+/* teacher insights: small tables, collapsible panel header, side-by-side code */
+.mini-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.mini-table th {
+  text-align: left;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--soft);
+  white-space: nowrap;
+}
+.mini-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--soft);
+  vertical-align: middle;
+}
+.panel-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.panel-toggle:focus-visible {
+  outline: 2px solid var(--m);
+  outline-offset: 4px;
+  border-radius: 8px;
+}
+.code-compare {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--soft);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow: auto;
+  max-height: 60vh;
+  white-space: pre;
+}
+
+/* teacher list: student name opens their progress */
+.name-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.name-link:hover {
+  color: var(--m);
+  text-decoration: underline;
+}
+.name-link:focus-visible {
+  outline: 2px solid var(--m);
+  outline-offset: 2px;
+  border-radius: 4px;
+}

@@ -8,9 +8,21 @@ import { FIRST_TRY_BONUS, POINTS, PROBLEMS, problemById, publicProblem, TOPICS, 
 import { grade, runOnce, type GradeResult } from '../src/lib/grader';
 import * as store from './db';
 import { GoogleAuthError, verifyGoogleToken } from './google';
+import { attachLive, notifyChanged } from './live';
+import { termText } from '../src/lib/terms';
 
 const app = express();
 app.use(express.json({ limit: '200kb' }));
+
+// any successful change (submit, join, sign-up, edits…) nudges open teacher pages to refresh;
+// draft autosaves don't change anything the teacher sees, so they're skipped
+app.use('/api', (req, res, next) => {
+  if (req.method !== 'GET' && !req.path.endsWith('/draft'))
+    res.on('finish', () => {
+      if (res.statusCode < 400) notifyChanged();
+    });
+  next();
+});
 
 type Authed = Request & { user: store.User; token: string };
 
@@ -35,6 +47,18 @@ const wrap =
     }
   };
 
+const needsClass = (u: store.User) => u.role === 'student' && (u.class_id == null || !!u.class_archived);
+
+/** Students outside an open class can't use problems / the leaderboard (the page shows the join screen; this stops direct API calls too). */
+function requireClass(req: Request, res: Response, next: NextFunction) {
+  if (needsClass((req as Authed).user)) {
+    res.status(403).json({ error: 'เข้าห้องเรียนก่อน — ใส่รหัสนักศึกษาและรหัสเข้าห้อง', needsClass: true });
+    return;
+  }
+  next();
+}
+for (const path of ['/api/problems', '/api/leaderboard', '/api/me']) app.use(path, (req, res, next) => auth(req, res, () => requireClass(req, res, next)));
+
 function teacherOnly(req: Request, res: Response, next: NextFunction) {
   if ((req as Authed).user.role !== 'teacher') {
     res.status(403).json({ error: 'หน้านี้สำหรับอาจารย์เท่านั้น' });
@@ -47,6 +71,9 @@ const userJson = (u: store.User) => ({
   studentId: u.student_id,
   name: u.name,
   section: u.section,
+  classId: u.class_id,
+  // students must be in an open class before using the app
+  needsClass: needsClass(u),
   initials: store.initials(u.name),
   role: u.role,
   email: u.email,
@@ -147,9 +174,9 @@ app.get('/api/me', auth, wrap((req, res) => {
   const u = req.user;
   const all = store.ranking(0);
   const me = all.find((r) => r.id === u.id);
-  const week = store.ranking(store.periodStart('week'), Infinity, u.section);
+  const week = store.ranking(store.periodStart('week'), Infinity, u.class_id);
   const weekStart = store.periodStart('week');
-  const lastWeek = store.ranking(weekStart - 7 * 24 * 3600 * 1000, weekStart, u.section);
+  const lastWeek = store.ranking(weekStart - 7 * 24 * 3600 * 1000, weekStart, u.class_id);
   const rankNow = week.find((r) => r.id === u.id)?.rank ?? null;
   const rankBefore = lastWeek.find((r) => r.id === u.id)?.rank ?? null;
 
@@ -185,7 +212,39 @@ app.get('/api/me', auth, wrap((req, res) => {
 // ---------- profile ----------
 
 app.get('/api/profile', auth, wrap((req, res) => {
-  res.json({ user: userJson(req.user), sections: store.sections() });
+  res.json({ user: userJson(req.user) });
+}));
+
+const joinFails = new Map<string, { n: number; until: number }>();
+
+/** A student enters the join code their teacher gave out. */
+app.post('/api/profile/class', auth, wrap((req, res) => {
+  if (req.user.role !== 'student') {
+    res.status(400).json({ error: 'บัญชีอาจารย์ไม่ต้องเข้าห้องเรียน' });
+    return;
+  }
+  // the student id comes first, so the teacher's list always shows who joined
+  if (!store.STUDENT_ID_RE.test(req.user.student_id)) {
+    res.status(400).json({ error: 'ตั้งรหัสนักศึกษาก่อน แล้วจึงใส่รหัสเข้าห้อง' });
+    return;
+  }
+  // 10 wrong codes → wait 10 minutes (stops guessing codes)
+  const key = `${req.user.id}`;
+  const f = joinFails.get(key);
+  if (f && f.n >= 10 && f.until > Date.now()) {
+    res.status(429).json({ error: `ใส่รหัสห้องผิดหลายครั้ง ลองใหม่ในอีก ${Math.ceil((f.until - Date.now()) / 60000)} นาที` });
+    return;
+  }
+  try {
+    store.joinClass(req.user.id, str(req.body?.code) ?? '');
+  } catch (e) {
+    if (!(e instanceof store.ProfileError)) throw e;
+    joinFails.set(key, { n: (f && f.until > Date.now() ? f.n : 0) + 1, until: Date.now() + 10 * 60 * 1000 });
+    res.status(400).json({ error: e.message });
+    return;
+  }
+  joinFails.delete(key);
+  res.json({ user: userJson(store.userById(req.user.id)!) });
 }));
 
 app.put('/api/profile', auth, wrap((req, res) => {
@@ -200,7 +259,6 @@ app.put('/api/profile', auth, wrap((req, res) => {
     }
     patch.studentId = sid;
   }
-  if (req.user.role === 'student') patch.section = str(b.section);
   const user = saveUser(res, req.user.id, patch);
   if (user) res.json({ user: userJson(user) });
 }));
@@ -226,8 +284,137 @@ app.put('/api/profile/password', auth, teacherOnly, wrap((req, res) => {
 
 app.get('/api/teacher/users', auth, teacherOnly, wrap((_req, res) => {
   res.json({
-    sections: store.sections(),
-    users: store.listUsers().map((u) => ({ id: u.id, ...userJson(u), points: u.points, passed: u.passed, lastActive: u.last_active })),
+    classes: store.listClasses(),
+    totalProblems: PROBLEMS.length,
+    users: store.listUsers().map((u) => ({
+      id: u.id,
+      ...userJson(u),
+      points: u.points,
+      passed: u.passed,
+      lastActive: u.last_active,
+      assigned: u.assigned,
+      onTime: u.on_time,
+    })),
+  });
+}));
+
+const ids = (v: unknown) => (Array.isArray(v) ? v.map(Number).filter(Number.isInteger).slice(0, 5000) : []);
+
+/** One student's problem-by-problem progress. */
+app.get('/api/teacher/users/:id/progress', auth, teacherOnly, wrap((req, res) => {
+  const u = store.userById(Number(req.params.id));
+  if (!u) {
+    res.status(404).json({ error: 'ไม่พบบัญชีนี้' });
+    return;
+  }
+  res.json({ user: { id: u.id, ...userJson(u) }, problems: store.progress(u.id) });
+}));
+
+/** How the given students are doing on each problem. */
+app.post('/api/teacher/stats', auth, teacherOnly, wrap((req, res) => {
+  res.json(store.problemStats(ids(req.body?.ids)));
+}));
+
+/** Nearly identical passing code among the given students. */
+app.post('/api/teacher/similar', auth, teacherOnly, wrap((req, res) => {
+  const t = Number(req.body?.threshold);
+  res.json({ pairs: store.similarCode(ids(req.body?.ids), t >= 0.5 && t <= 1 ? t : 0.85) });
+}));
+
+app.get('/api/teacher/audit', auth, teacherOnly, wrap((_req, res) => {
+  res.json({ log: store.auditLog(100) });
+}));
+
+app.get('/api/teacher/classes/:id/assignments', auth, teacherOnly, wrap((req, res) => {
+  res.json({ assignments: store.assignments(Number(req.params.id)) });
+}));
+
+app.put('/api/teacher/classes/:id/assignments', auth, teacherOnly, wrap((req, res) => {
+  const list = Array.isArray(req.body?.assignments) ? req.body.assignments : [];
+  const id = Number(req.params.id);
+  try {
+    store.setAssignments(
+      id,
+      list.map((a: { problemId?: unknown; dueAt?: unknown }) => ({ problemId: Number(a?.problemId), dueAt: Number(a?.dueAt) })),
+    );
+  } catch (e) {
+    if (!(e instanceof store.ProfileError)) throw e;
+    res.status(400).json({ error: e.message });
+    return;
+  }
+  const c = store.classById(id)!;
+  store.audit(req.user, 'มอบหมายโจทย์', `${c.name} · ${termText(c)}: ${list.length} ข้อ`);
+  res.json({ assignments: store.assignments(id) });
+}));
+
+/** Sends ProfileError as 400; otherwise the class as JSON. */
+function classReply(res: Response, fn: () => unknown) {
+  try {
+    res.json({ class: fn() });
+  } catch (e) {
+    // the page lists these old classes with a delete button
+    if (e instanceof store.OldClassesError) res.status(409).json({ error: e.message, oldClasses: e.classes });
+    else if (e instanceof store.ProfileError) res.status(400).json({ error: e.message });
+    else throw e;
+  }
+}
+const int = (v: unknown) => (typeof v === 'number' ? v : typeof v === 'string' && v.trim() ? Number(v) : undefined);
+
+app.post('/api/teacher/classes', auth, teacherOnly, wrap((req, res) => {
+  const b = req.body ?? {};
+  classReply(res, () => {
+    const c = store.createClass(str(b.name) ?? '', int(b.year) ?? NaN, int(b.term) ?? NaN);
+    store.audit(req.user, 'สร้างห้อง', `${c.name} · ${termText(c)}`);
+    return { ...c, students: 0, pending: 0, assigned: 0 };
+  });
+}));
+
+/** Pasted list of student ids / emails → this class (existing accounts move now, the rest on first sign-in). */
+app.post('/api/teacher/classes/:id/roster', auth, teacherOnly, wrap((req, res) => {
+  const text = str(req.body?.text) ?? '';
+  if (text.length > 100_000) {
+    res.status(400).json({ error: 'รายชื่อยาวเกินไป — แบ่งวางทีละส่วน' });
+    return;
+  }
+  try {
+    const r = store.addRoster(Number(req.params.id), text);
+    const c = store.classById(Number(req.params.id))!;
+    store.audit(req.user, 'เพิ่มรายชื่อ', `${c.name} · ${termText(c)}: ย้าย ${r.moved.length} · รอล็อกอิน ${r.pending}`);
+    res.json(r);
+  } catch (e) {
+    if (!(e instanceof store.ProfileError)) throw e;
+    res.status(400).json({ error: e.message });
+  }
+}));
+
+app.delete('/api/teacher/classes/:id', auth, teacherOnly, wrap((req, res) => {
+  let r: ReturnType<typeof store.deleteClass>;
+  const c = store.classById(Number(req.params.id));
+  try {
+    r = store.deleteClass(Number(req.params.id));
+  } catch (e) {
+    if (!(e instanceof store.ProfileError)) throw e;
+    res.status(404).json({ error: e.message });
+    return;
+  }
+  if (r.backup) console.log(`ลบห้องแล้ว — สำรองฐานข้อมูลก่อนลบไว้ที่ ${r.backup}`);
+  if (c) store.audit(req.user, 'ลบห้อง', `${c.name} · ${termText(c)} · ล้างข้อมูลนักศึกษา ${r.wiped} คน`);
+  res.json({ ok: true, wiped: r.wiped });
+}));
+
+app.patch('/api/teacher/classes/:id', auth, teacherOnly, wrap((req, res) => {
+  const b = req.body ?? {};
+  classReply(res, () => {
+    const c = store.updateClass(Number(req.params.id), {
+      name: str(b.name),
+      year: int(b.year),
+      term: int(b.term),
+      archived: typeof b.archived === 'boolean' ? b.archived : undefined,
+      newCode: b.newCode === true,
+    });
+    const what = b.archived === true ? 'ปิดห้อง' : b.archived === false ? 'เปิดห้องอีกครั้ง' : b.newCode === true ? 'สุ่มรหัสห้องใหม่' : 'แก้ไขห้อง';
+    store.audit(req.user, what, `${c.name} · ${termText(c)}`);
+    return c;
   });
 }));
 
@@ -253,14 +440,34 @@ app.patch('/api/teacher/users/:id', auth, teacherOnly, wrap((req, res) => {
       return;
     }
   }
-  const user = saveUser(res, id, { name: str(b.name), studentId: str(b.studentId), section: str(b.section) });
-  if (user) res.json({ user: { id: user.id, ...userJson(user) } });
+  // classId: a class id moves the student there, null takes them out of any class
+  if (b.classId !== undefined && target.role === 'student') {
+    try {
+      store.setUserClass(id, b.classId === null ? null : Number(b.classId));
+    } catch (e) {
+      if (!(e instanceof store.ProfileError)) throw e;
+      res.status(400).json({ error: e.message });
+      return;
+    }
+  }
+  const user = saveUser(res, id, { name: str(b.name), studentId: str(b.studentId) });
+  if (user) {
+    const changed = [
+      b.name !== undefined && `ชื่อ → ${user.name}`,
+      b.studentId !== undefined && `รหัส ${target.student_id} → ${user.student_id}`,
+      b.classId !== undefined && `ห้อง → ${user.section || 'ไม่มี'}`,
+      password !== undefined && 'ตั้งรหัสผ่านใหม่',
+    ].filter(Boolean);
+    store.audit(req.user, 'แก้ไขบัญชี', `${target.name}: ${changed.join(' · ')}`);
+    res.json({ user: { id: user.id, ...userJson(user) } });
+  }
 }));
 
 app.post('/api/teacher/teachers', auth, teacherOnly, wrap((req, res) => {
   const b = req.body ?? {};
   try {
     const u = store.addTeacher(str(b.username) ?? '', str(b.name) ?? '', str(b.password) ?? '');
+    store.audit(req.user, 'เพิ่มอาจารย์', `${u.name} (${u.student_id})`);
     res.json({ user: { id: u.id, ...userJson(u), points: 0, passed: 0, lastActive: null } });
   } catch (e) {
     if (!(e instanceof store.ProfileError)) throw e;
@@ -270,7 +477,9 @@ app.post('/api/teacher/teachers', auth, teacherOnly, wrap((req, res) => {
 
 // ---------- problems ----------
 
-const summary =(p: Problem, s?: { st: store.Status; passed?: number; total?: number }) => ({
+const summary = (p: Problem, s?: { st: store.Status; passed?: number; total?: number }, dueAt?: number, solvedAt?: number) => ({
+  dueAt: dueAt ?? null,
+  solvedAt: solvedAt ?? null,
   id: p.id,
   title: p.title,
   sub: p.sub,
@@ -285,7 +494,11 @@ const summary =(p: Problem, s?: { st: store.Status; passed?: number; total?: num
 
 app.get('/api/problems', auth, wrap((req, res) => {
   const st = store.statuses(req.user.id);
-  res.json({ topics: TOPICS, problems: PROBLEMS.map((p) => summary(p, st.get(p.id))) });
+  const due = store.dueMap(req.user);
+  const solvedAt = new Map(
+    (store.db.prepare('SELECT problem_id, solved_at FROM solves WHERE user_id = ?').all(req.user.id) as { problem_id: number; solved_at: number }[]).map((r) => [r.problem_id, r.solved_at]),
+  );
+  res.json({ topics: TOPICS, problems: PROBLEMS.map((p) => summary(p, st.get(p.id), due.get(p.id), solvedAt.get(p.id))) });
 }));
 
 function getProblem(req: Request, res: Response): Problem | null {
@@ -320,6 +533,7 @@ app.get('/api/problems/:id', auth, wrap((req, res) => {
     last: store.lastAttempt(uid, p.id),
     prev: PROBLEMS[idx - 1]?.id ?? null,
     next: PROBLEMS[idx + 1]?.id ?? null,
+    dueAt: store.dueMap(req.user).get(p.id) ?? null,
   });
 }));
 
@@ -350,7 +564,7 @@ function run(kind: 'test' | 'submit') {
     const pass = !result.errors.length && result.passed === result.total;
     let awarded: number | null = null;
     // points are computed before this attempt is recorded so the first submit counts as first try
-    if (kind === 'submit' && pass) awarded = store.markSolved(uid, p.id);
+    if (kind === 'submit' && pass) awarded = store.markSolved(uid, p.id, code);
     store.recordAttempt(uid, p.id, kind, result.passed, result.total, result);
     res.json({ ...result, kind, pass, awarded, alreadySolved: kind === 'submit' && pass && awarded == null });
   });
@@ -405,13 +619,12 @@ app.post('/api/problems/:id/reveal', auth, wrap((_req, res) => {
 app.get('/api/leaderboard', auth, wrap((req, res) => {
   const period = (['week', 'month', 'all'].includes(String(req.query.period)) ? req.query.period : 'week') as store.Period;
   const scope = req.query.scope === 'all' ? 'all' : 'section';
-  const rows = store.ranking(store.periodStart(period), Infinity, scope === 'section' ? req.user.section : undefined);
+  // "my class" for a student without one falls back to everyone
+  const classId = scope === 'section' ? req.user.class_id : null;
+  const rows = store.ranking(store.periodStart(period), Infinity, classId);
   const meIdx = rows.findIndex((r) => r.id === req.user.id);
   const me = rows[meIdx];
   const above = me ? [...rows].reverse().find((r) => r.points > me.points) : undefined;
-  const sections = (store.db.prepare("SELECT DISTINCT section FROM users WHERE role = 'student' ORDER BY section").all() as { section: string }[]).map(
-    (r) => r.section,
-  );
   const uid = req.user.id;
   const DAY = 24 * 3600 * 1000;
   const now = Date.now();
@@ -420,7 +633,7 @@ app.get('/api/leaderboard', auth, wrap((req, res) => {
   // rank in the previous window of the same kind, to show ▲ / ▼
   const prevFrom = period === 'week' ? start - 7 * DAY : period === 'month' ? store.periodStart('month', new Date(start - DAY)) : 0;
   const prevTo = period === 'all' ? now - 7 * DAY : start;
-  const before = store.ranking(prevFrom, prevTo, scope === 'section' ? req.user.section : undefined).find((r) => r.id === uid);
+  const before = store.ranking(prevFrom, prevTo, classId).find((r) => r.id === uid);
   const rankDelta = me && before && before.points > 0 ? before.rank - me.rank : null;
 
   const st = store.statuses(uid);
@@ -429,7 +642,6 @@ app.get('/api/leaderboard', auth, wrap((req, res) => {
     period,
     scope,
     section: req.user.section,
-    sections,
     rows: rows.map((r) => ({ rank: r.rank, name: r.name, initials: store.initials(r.name), passed: r.passed, points: r.points, me: r.id === req.user.id })),
     me: me
       ? {
@@ -466,7 +678,7 @@ if (existsSync(dist)) {
 }
 
 const port = Number(process.env.PORT ?? 3001);
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`MIPS Lab API → http://localhost:${port}`);
   if (DEV_LOGIN) console.log('⚠ เปิดปุ่ม "เข้าแบบทดลอง" (dev) ในหน้าล็อกอิน — ใช้ตอนพัฒนาเท่านั้น');
   else if (!GOOGLE_CLIENT_ID) console.log('⚠ ยังไม่ได้ตั้ง GOOGLE_CLIENT_ID ใน .env — จะยังล็อกอินไม่ได้');
@@ -477,3 +689,18 @@ app.listen(port, () => {
     console.log('ยังไม่มีบัญชีอาจารย์ — สร้างด้วย: npm run user -- teacher <ชื่อผู้ใช้> "<ชื่อ>"');
   }
 });
+
+// live updates for the teacher page (WebSocket on the same port)
+attachLive(server);
+
+// a copy of the database each day in data/backups/ (last 14 kept)
+const daily = () => {
+  try {
+    const f = store.dailyBackup();
+    if (f) console.log(`สำรองฐานข้อมูลประจำวันแล้ว → ${f}`);
+  } catch (e) {
+    console.error('สำรองฐานข้อมูลไม่สำเร็จ', e);
+  }
+};
+daily();
+setInterval(daily, 6 * 3600 * 1000).unref();

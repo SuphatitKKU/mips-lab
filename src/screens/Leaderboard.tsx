@@ -129,8 +129,8 @@ export function Leaderboard() {
     <>
       <PageHeader title="อันดับ">
         <Segmented label="ช่วงเวลา" value={period} onChange={setPeriod} options={PERIODS.map(([value, label]) => ({ value, label }))} />
-        <select aria-label="กลุ่ม" className="select-pill" value={scope} onChange={(e) => setScope(e.target.value as 'section' | 'all')}>
-          <option value="section">กลุ่มของฉัน{data?.section ? ` · ${data.section}` : ''}</option>
+        <select aria-label="ห้อง" className="select-pill" value={scope} onChange={(e) => setScope(e.target.value as 'section' | 'all')}>
+          <option value="section">ห้องของฉัน{data?.section ? ` · ${data.section}` : ''}</option>
           <option value="all">ทุกคน</option>
         </select>
       </PageHeader>

@@ -2,9 +2,9 @@
 //   npm run seed:demo
 
 import { POINTS, PROBLEMS } from '../src/data/problems';
-import { addUser, db } from './db';
+import { termOf } from '../src/lib/terms';
+import { addUser, createClass, db, listClasses } from './db';
 
-const SECTION = 'SEC 1';
 const CLASSMATES: [string, string, number][] = [
   ['6601000001', 'ภูมิ ก.', 12],
   ['6601000002', 'มายด์ ศ.', 11],
@@ -19,9 +19,12 @@ const CLASSMATES: [string, string, number][] = [
 const exists = (id: string) => !!db.prepare('SELECT 1 FROM users WHERE student_id = ?').get(id);
 
 const day = 24 * 3600 * 1000;
+const now = termOf();
+const classFor = (name: string) =>
+  (listClasses().find((c) => c.name === name && c.year === now.year && c.term === now.term) ?? createClass(name, now.year, now.term)).code;
 CLASSMATES.forEach(([id, name, solved], k) => {
   if (exists(id)) return;
-  addUser(id, name, k % 3 === 2 ? 'SEC 2' : SECTION, null);
+  addUser(id, name, classFor(k % 3 === 2 ? 'SEC 2' : 'SEC 1'), null);
   const uid = (db.prepare('SELECT id FROM users WHERE student_id = ?').get(id) as { id: number }).id;
   PROBLEMS.slice(0, solved).forEach((p, i) => {
     const at = Date.now() - ((i * 3 + k) % 20) * day - i * 3600_000;

@@ -35,6 +35,8 @@ export function setToken(token: string | null, remember = true) {
 
 /** Fired when the server rejects the session so the app can return to the login page. */
 export const UNAUTHORIZED = 'mipslab:unauthorized';
+/** Fired when the server says the student must join a class first (e.g. the teacher closed theirs). */
+export const NEEDS_CLASS = 'mipslab:needs-class';
 
 export async function api<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
   const token = getToken();
@@ -54,6 +56,7 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     if (res.status === 401 && token) window.dispatchEvent(new Event(UNAUTHORIZED));
+    if (res.status === 403 && (data as { needsClass?: boolean }).needsClass) window.dispatchEvent(new Event(NEEDS_CLASS));
     throw new ApiError(res.status, (data as { error?: string }).error ?? `เกิดข้อผิดพลาด (${res.status})`, data);
   }
   return data as T;

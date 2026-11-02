@@ -3,6 +3,7 @@ import { useBlocker, useNavigate } from 'react-router-dom';
 import { api, ApiError, useApi } from '../api';
 import { ROLE_LABEL, useAuth, type Me } from '../auth';
 import { Icon, ICON } from '../components/Icon';
+import { JoinClass } from '../components/JoinClass';
 import { usePopup } from '../components/Popup';
 import { ErrorBox, PageHeader, Skeleton } from '../components/ui';
 
@@ -13,14 +14,13 @@ export function Settings() {
   const { user, logout, updateUser } = useAuth();
   const navigate = useNavigate();
   const popup = usePopup();
-  const { data, error, reload } = useApi<{ user: Me; sections: string[] }>('/profile');
+  const { data, error, reload } = useApi<{ user: Me }>('/profile');
   const me = data?.user ?? user;
   const isTeacher = me?.role === 'teacher';
   const idLocked = !isTeacher && !!me && STUDENT_ID_RE.test(me.studentId);
 
   const [name, setName] = useState('');
   const [studentId, setStudentId] = useState('');
-  const [section, setSection] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [reloading, setReloading] = useState(false); // saved, waiting for the fresh profile
@@ -32,13 +32,11 @@ export function Settings() {
     setName(data.user.name);
     // teachers edit their username here; students only see a real student id (not the email fallback)
     setStudentId(data.user.role === 'teacher' || STUDENT_ID_RE.test(data.user.studentId) ? data.user.studentId : '');
-    setSection(data.user.section);
   }, [data]);
 
   const dirty =
     !!data &&
     (name.trim() !== data.user.name ||
-      (!isTeacher && section.trim() !== data.user.section) ||
       (!idLocked && studentId.trim() !== '' && studentId.trim().toLowerCase() !== data.user.studentId.toLowerCase()));
 
   // leaving with unsaved edits asks first (signing out never does — that's its own confirm)
@@ -65,7 +63,6 @@ export function Settings() {
     setBusy(true);
     try {
       const body: Record<string, string> = { name };
-      if (!isTeacher) body.section = section;
       if (!idLocked && studentId.trim()) body.studentId = studentId;
       const r = await api<{ user: Me }>('/profile', { method: 'PUT', body });
       updateUser(r.user);
@@ -178,17 +175,6 @@ export function Settings() {
 
             {!isTeacher && (
               <label className="field">
-                กลุ่มเรียน (section)
-                <input className="input" value={section} onChange={(e) => setSection(e.target.value)} list="sections" maxLength={40} placeholder="เช่น SEC 1" />
-                <datalist id="sections">
-                  {data?.sections.map((s) => <option key={s} value={s} />)}
-                </datalist>
-                <span style={{ fontSize: 13, fontWeight: 400, color: 'var(--muted)' }}>ใช้จัดกลุ่มในกระดานอันดับ "กลุ่มของฉัน"</span>
-              </label>
-            )}
-
-            {!isTeacher && (
-              <label className="field">
                 อีเมล Google
                 <input className="input" value={me?.email ?? '—'} disabled style={{ color: 'var(--muted)' }} />
               </label>
@@ -207,6 +193,23 @@ export function Settings() {
               </button>
             </div>
           </form>
+        )}
+
+        {!isTeacher && data && (
+          <section aria-label="ห้องเรียน" className="card" style={{ padding: '28px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <h2 style={{ fontSize: 20, flex: 1 }}>ห้องเรียน</h2>
+              <span className="chip" style={me?.section ? { background: 'var(--m)', color: '#fff' } : { background: 'var(--soft)', color: 'var(--body-alt)' }}>
+                {me?.section || 'ยังไม่ได้เข้าห้อง'}
+              </span>
+            </div>
+            <span style={{ fontSize: 14, color: 'var(--muted)' }}>
+              {me?.section
+                ? 'ลงเรียนใหม่ในเทอมอื่นหรือย้ายกลุ่ม ใส่รหัสห้องใหม่จากอาจารย์ — คะแนนเดิมยังอยู่ครบ'
+                : 'ใส่รหัสเข้าห้องที่อาจารย์ให้ เพื่อให้อาจารย์เห็นคุณในรายชื่อ และกระดานอันดับเทียบกับเพื่อนในห้อง'}
+            </span>
+            <JoinClass label={me?.section ? 'ย้ายห้อง' : 'เข้าห้อง'} onJoined={reload} />
+          </section>
         )}
 
         {isTeacher && data && <ChangePassword />}
