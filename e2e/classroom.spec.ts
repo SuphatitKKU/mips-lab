@@ -253,7 +253,7 @@ test("teacher creates a published exercise in browser and sees real dashboard", 
   await page
     .getByRole("radio", { name: "นักศึกษาและคะแนน", exact: true })
     .click();
-  await page.getByRole("textbox", { name: "ค้นหานักศึกษา" }).fill(testSid);
+  await page.getByRole("searchbox", { name: "ค้นหานักศึกษา" }).fill(testSid);
   await expect(page.getByText("นักศึกษาทดสอบ", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "ดูผลรายคน" }).click();
   await expect(page.getByText("คะแนนรวม 30", { exact: false })).toBeVisible();

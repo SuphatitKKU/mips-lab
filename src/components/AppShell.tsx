@@ -1,8 +1,10 @@
+import { ClassGate } from './ClassGate';
 import { useEffect } from 'react';
 import { Link, Navigate, Outlet, useLocation } from 'react-router-dom';
 import { ROLE_LABEL, useAuth } from '../auth';
 import { Icon, ICON } from './Icon';
-import { Tour, TOUR_EVENT } from './Tour';
+import { TOUR_EVENT } from './Tour';
+import { BrandLogo } from './BrandLogo';
 
 type NavItem = [path: string, icon: keyof typeof ICON, label: string];
 
@@ -22,37 +24,42 @@ function isActive(path: string, current: string) {
 
 export function AppShell() {
   const { loggedIn, user, isTeacher } = useAuth();
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
 
   useEffect(() => {
     window.scrollTo(0, 0);
   }, [pathname]);
 
-  if (!loggedIn) return <Navigate to="/login" replace state={{ from: pathname }} />;
+  if (!loggedIn) return <Navigate to="/login" replace state={{ from: pathname + search }} />;
+
+  if (user?.needsClass) return <ClassGate />;
 
   return (
     <div className="app">
+      <header className="workspace-bar">
+        <Link to="/" className="workspace-brand" aria-label="MIPS Lab หน้าแรก"><BrandLogo /></Link>
+        <span className="workspace-label">ห้องทดลองสถาปัตยกรรมคอมพิวเตอร์</span>
+        <Link to="/code" className="workspace-action"><Icon d={ICON.convert} size={17} /><span>เปิดพื้นที่เขียนโค้ด</span></Link>
+        <Link to="/settings" className="workspace-profile" aria-label="ตั้งค่าโปรไฟล์">{user?.initials ?? 'นศ'}</Link>
+      </header>
       <nav aria-label="เมนูหลัก" className="rail">
-        <Link to="/" aria-label="MIPS Lab หน้าแรก" className="rail-logo">
-          <Icon d={ICON.chip} size={24} />
-        </Link>
         {(isTeacher ? [...NAV, ...TEACHER_NAV] : NAV).map(([path, icon, label]) => {
           const active = isActive(path, pathname);
           return (
             <Link
               key={path}
               to={path}
+              aria-label={label}
+              title={label}
               aria-current={active ? 'page' : undefined}
               className={`rail-item${active ? ' active' : ''}`}
             >
               <Icon d={ICON[icon]} size={22} />
-              {label}
             </Link>
           );
         })}
-        <span style={{ flex: 1 }} />
         <button className="rail-help" data-tour="help" aria-label="แนะนำหน้านี้" title="แนะนำหน้านี้" onClick={() => window.dispatchEvent(new Event(TOUR_EVENT))}>
-          ?
+          <Icon d={ICON.info} size={20} />
         </button>
         <Link
           to="/settings"
@@ -71,7 +78,6 @@ export function AppShell() {
           <Outlet />
         </div>
       </div>
-      <Tour />
     </div>
   );
 }

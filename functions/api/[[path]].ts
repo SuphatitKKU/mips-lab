@@ -1,3 +1,7 @@
+import { GoogleAccounts, GoogleLoginError } from "../../cloudflare/firebase";
+import { StudentRegistration } from "../../cloudflare/registration";
+import { firebaseConfig } from "../../src/lib/firebaseConfig";
+import { Classroom, ClassroomError } from "../../cloudflare/classroom";
 import { FIRST_TRY_BONUS, type Problem } from "../../src/data/problems";
 import { grade, runOnce, type GradeResult } from "../../src/lib/grader";
 import { Store, type User, type ProblemRow } from "../../cloudflare/store";
@@ -49,15 +53,16 @@ const redact = (r: GradeResult): GradeResult => ({
 });
 async function route(request: Request, env: Env): Promise<Response> {
   const s = new Store(env.DB),
+    classroom = new Classroom(s),
     url = new URL(request.url),
     path = url.pathname.replace(/^\/api/, "").replace(/\/$/, ""),
     method = request.method;
   let body: Record<string, unknown> = {};
   if (!["GET", "HEAD"].includes(method)) {
-    if (Number(request.headers.get("content-length") ?? 0) > 200000)
+    if (Number(request.headers.get("content-length") ?? 0) > 2100000)
       fail(413, "ข้อมูลใหญ่เกินไป");
     const raw = await request.text();
-    if (raw.length > 200000) fail(413, "ข้อมูลใหญ่เกินไป");
+    if (raw.length > 2100000) fail(413, "ข้อมูลใหญ่เกินไป");
     try {
       body = raw ? JSON.parse(raw) : {};
     } catch {
@@ -72,16 +77,36 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   if (path === "/auth/config" && method === "GET")
     return json({
+      firebase: firebaseConfig,
+      googleEnabled: true,
       googleClientId: null,
       googleDomain: null,
       devLogin: false,
       passwordLogin: true,
+      studentRegistration: true,
+      teacherGoogleLogin: false,
     });
+  if (path === "/auth/register" && method === "POST") {
+    const user = await new StudentRegistration(s).create(
+      body,
+      request.headers.get("cf-connecting-ip") ?? "local",
+    );
+    return json(
+      {
+        token: await s.session(user),
+        user: await classroom.userJson(user),
+        created: true,
+      },
+      201,
+    );
+  }
   if (path === "/auth/password" && method === "POST") {
     const username = text(body.username, 64).toLowerCase(),
       password = typeof body.password === "string" ? body.password : "";
+    const studentLogin = /^\d{9,12}(?:-\d)?$/.test(username);
+    const loginId = studentLogin ? username.replace(/-/g, "") : username;
     const key = await digest(
-        `${request.headers.get("cf-connecting-ip") ?? "local"}|${username}`,
+        `${request.headers.get("cf-connecting-ip") ?? "local"}|${loginId}`,
       ),
       now = Date.now();
     const locked = await s.first<{ failures: number; until_at: number }>(
@@ -90,9 +115,11 @@ async function route(request: Request, env: Env): Promise<Response> {
     );
     if (locked && locked.failures >= 5 && locked.until_at > now)
       fail(429, "ใส่รหัสผิดหลายครั้ง ลองใหม่ใน 10 นาที");
-    const u = await s.first<User>(
-      "SELECT * FROM users WHERE student_id=? AND active=1",
+    let u = await s.first<User>(
+      "SELECT * FROM users WHERE active=1 AND (student_id=? OR (?=1 AND REPLACE(student_id,'-','')=?))",
       username,
+      studentLogin ? 1 : 0,
+      loginId,
     );
     if (!u || !(await checkPassword(password, u.pw_hash))) {
       await s
@@ -110,10 +137,22 @@ async function route(request: Request, env: Env): Promise<Response> {
       s.stmt("DELETE FROM login_limits WHERE until_at<?", now),
       s.stmt("DELETE FROM sessions WHERE expires_at<?", now),
     ]);
+    u = await classroom.claim(u!);
     return json({
       token: await s.session(u),
-      user: s.userJson(u, await s.year()),
+      user: await classroom.userJson(u),
       created: false,
+    });
+  }
+  if (path === "/auth/google" && method === "POST") {
+    const result = await new GoogleAccounts(s).login(
+      typeof body.idToken === "string" ? body.idToken : "",
+    );
+    const user = await classroom.claim(result.user);
+    return json({
+      token: await s.session(user),
+      user: await classroom.userJson(user),
+      created: result.created,
     });
   }
   if (path.startsWith("/auth/") && path !== "/auth/logout")
@@ -130,7 +169,7 @@ async function route(request: Request, env: Env): Promise<Response> {
       )
     : null;
   if (!user) return json({ error: "กรุณาเข้าสู่ระบบใหม่" }, 401);
-  const u = user;
+  const u = await classroom.claim(user);
   if (!u.last_active || Date.now() - u.last_active > 60000)
     await s
       .stmt("UPDATE users SET last_active=? WHERE id=?", Date.now(), u.id)
@@ -142,20 +181,72 @@ async function route(request: Request, env: Env): Promise<Response> {
     await s.stmt("DELETE FROM sessions WHERE token_hash=?", tokenHash).run();
     return json({ ok: true });
   }
+  if (path === "/profile/google" && method === "POST") {
+    const linked = await new GoogleAccounts(s).link(
+      u,
+      typeof body.idToken === "string" ? body.idToken : "",
+    );
+    return json({ user: await classroom.userJson(linked) });
+  }
+  const classroomResponse = await classroom.handle(path, method, body, u);
+  if (classroomResponse) return classroomResponse;
+  if (
+    u.role === "student" &&
+    /^\/(problems|leaderboard|me)(?:\/|$)/.test(path)
+  ) {
+    if ((await classroom.userJson(u)).needsClass)
+      return json({ error: "กรุณาเข้าห้องเรียนก่อน", needsClass: true }, 403);
+  }
   if (path === "/profile" && method === "GET")
     return json({
-      user: s.userJson(u, await s.year()),
+      user: await classroom.userJson(u),
       sections: await s.sections(),
     });
   if (path === "/profile" && method === "PUT") {
-    const name = text(body.name, 80);
+    const name = body.name === undefined ? u.name : text(body.name, 80);
     if (!name) fail(400, "กรอกชื่อ");
-    if (body.studentId !== undefined && body.studentId !== u.student_id)
-      fail(403, "ติดต่ออาจารย์เพื่อแก้รหัสนักศึกษาหรือชื่อผู้ใช้");
+    let studentId = u.student_id;
+    if (body.studentId !== undefined && body.studentId !== u.student_id) {
+      if (
+        u.role !== "student" ||
+        !u.firebase_uid ||
+        /^\d{9,12}(?:-\d)?$/.test(u.student_id)
+      )
+        fail(403, "ติดต่ออาจารย์เพื่อแก้รหัสนักศึกษาหรือชื่อผู้ใช้");
+      studentId = text(body.studentId, 20);
+      if (!/^\d{9,12}(?:-\d)?$/.test(studentId))
+        fail(
+          400,
+          "รหัสนักศึกษาต้องเป็นตัวเลข 9–12 หลัก อนุญาตขีดและเลขตรวจสอบ",
+        );
+      if (
+        await s.first(
+          "SELECT id FROM users WHERE REPLACE(student_id,'-','')=? AND id<>?",
+          studentId.replace(/-/g, ""),
+          u.id,
+        )
+      )
+        fail(
+          409,
+          "รหัสนี้มีบัญชีเดิมอยู่แล้ว ให้เข้าบัญชีเดิมแล้วเชื่อม Google ในหน้าตั้งค่า หรือติดต่ออาจารย์",
+        );
+    }
     if (body.section !== undefined && body.section !== u.section)
       fail(403, "ติดต่ออาจารย์เพื่อย้ายกลุ่มเรียน");
-    await s.stmt("UPDATE users SET name=? WHERE id=?", name, u.id).run();
-    return json({ user: s.userJson({ ...u, name }, await s.year()) });
+    await s
+      .stmt(
+        "UPDATE users SET name=?,student_id=? WHERE id=?",
+        name,
+        studentId,
+        u.id,
+      )
+      .run();
+    const updated = await classroom.claim({
+      ...u,
+      name,
+      student_id: studentId,
+    });
+    return json({ user: await classroom.userJson(updated) });
   }
   if (path === "/profile/password" && method === "PUT") {
     if (!(await checkPassword(String(body.current ?? ""), u.pw_hash)))
@@ -175,7 +266,9 @@ async function route(request: Request, env: Env): Promise<Response> {
     teacher();
     if (path === "/teacher/users" && method === "GET")
       return json({
-        users: await s.users(),
+        users: await classroom.users(),
+        classes: await classroom.classes(),
+        totalProblems: (await s.problems(u)).length,
         sections: await s.sections(),
         academicYear: await s.year(),
       });
@@ -209,8 +302,24 @@ async function route(request: Request, env: Env): Promise<Response> {
           400,
           "ชื่อหรือรหัสไม่ถูกต้อง (รหัสนักศึกษา 9–12 หลัก อนุญาต -เลขตรวจสอบ)",
         );
+      const cid =
+        role === "student"
+          ? body.classId === undefined
+            ? await classroom.legacyClass(section)
+            : body.classId === null
+              ? null
+              : Number(body.classId)
+          : null;
+      if (cid !== null) await classroom.class(cid, true);
       const hash = await hashPassword(String(body.password ?? ""));
-      if (await s.first("SELECT id FROM users WHERE student_id=?", id))
+      if (
+        await s.first(
+          role === "student"
+            ? "SELECT id FROM users WHERE REPLACE(student_id,'-','')=?"
+            : "SELECT id FROM users WHERE student_id=?",
+          role === "student" ? id.replace(/-/g, "") : id,
+        )
+      )
         fail(409, "รหัสหรือชื่อผู้ใช้นี้มีอยู่แล้ว");
       const r = await s
         .stmt(
@@ -223,14 +332,20 @@ async function route(request: Request, env: Env): Promise<Response> {
           Date.now(),
         )
         .run();
-      const row = (await s.first<User>(
+      let row = (await s.first<User>(
         "SELECT * FROM users WHERE id=?",
         r.meta.last_row_id,
       ))!;
+      if (role === "student") {
+        await classroom.setClass(row.id, cid);
+        row = await classroom.claim(
+          (await s.first<User>("SELECT * FROM users WHERE id=?", row.id))!,
+        );
+      }
       return json(
         {
           user: {
-            ...s.userJson(row, await s.year()),
+            ...(await classroom.userJson(row)),
             points: 0,
             passed: 0,
             lastActive: null,
@@ -264,6 +379,8 @@ async function route(request: Request, env: Env): Promise<Response> {
         });
       }
       if (!match[2] && method === "PATCH") {
+        if (body.section !== undefined && body.section !== target!.section)
+          fail(400, "ย้ายกลุ่มเรียนด้วย classId");
         const t = target!,
           name = body.name === undefined ? t.name : text(body.name, 80),
           id =
@@ -301,12 +418,20 @@ async function route(request: Request, env: Env): Promise<Response> {
           fail(400, "ต้องมีอาจารย์อย่างน้อยหนึ่งบัญชี");
         if (
           await s.first(
-            "SELECT id FROM users WHERE student_id=? AND id<>?",
-            id,
+            t.role === "student"
+              ? "SELECT id FROM users WHERE REPLACE(student_id,'-','')=? AND id<>?"
+              : "SELECT id FROM users WHERE student_id=? AND id<>?",
+            t.role === "student" ? id.replace(/-/g, "") : id,
             t.id,
           )
         )
           fail(409, "รหัสซ้ำ");
+        let nextClassId = t.class_id;
+        if (t.role === "student" && body.classId !== undefined) {
+          nextClassId = body.classId === null ? null : Number(body.classId);
+          if (nextClassId !== null)
+            await classroom.class(nextClassId, nextClassId !== t.class_id);
+        }
         const hash =
           body.password === undefined
             ? t.pw_hash
@@ -326,18 +451,23 @@ async function route(request: Request, env: Env): Promise<Response> {
             ? [s.stmt("DELETE FROM sessions WHERE user_id=?", t.id)]
             : []),
         ]);
+        if (
+          t.role === "student" &&
+          body.classId !== undefined &&
+          nextClassId !== t.class_id
+        )
+          await classroom.setClass(t.id, nextClassId);
+        await classroom.audit(u, "แก้ไขบัญชี", id);
         return json({
-          user: s.userJson(
-            {
-              ...t,
-              name,
-              student_id: id,
-              section,
-              active,
-              year_override: override,
-            },
-            await s.year(),
-          ),
+          user: await classroom.userJson({
+            ...t,
+            name,
+            student_id: id,
+            section,
+            active,
+            year_override: override,
+            class_id: nextClassId,
+          }),
         });
       }
     }
@@ -427,7 +557,8 @@ async function route(request: Request, env: Env): Promise<Response> {
     if (path === "/teacher/overview" && method === "GET") {
       return json({
         academicYear: await s.year(),
-        students: await s.users(),
+        students: await classroom.users(),
+        classes: await classroom.classes(),
         problems: await s
           .all<Record<string, unknown> & { body: string }>(
             "SELECT p.id,p.body,p.published,p.section,p.due_at,COUNT(DISTINCT a.user_id) attempted,COUNT(DISTINCT sv.user_id) solved FROM problems p LEFT JOIN attempts a ON a.problem_id=p.id AND a.user_id IN (SELECT id FROM users WHERE role='student') LEFT JOIN solves sv ON sv.problem_id=p.id GROUP BY p.id ORDER BY p.id",
@@ -445,7 +576,21 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   const rows = await s.problems(u),
     st = await s.status(u.id);
-  if (path === "/problems" && method === "GET")
+  if (path === "/problems" && method === "GET") {
+    const due = new Map(
+      (await classroom.assignments(u.class_id ?? -1)).map((a) => [
+        a.problemId,
+        a.dueAt,
+      ]),
+    );
+    const solves = new Map(
+      (
+        await s.all<{ problem_id: number; solved_at: number }>(
+          "SELECT problem_id,solved_at FROM solves WHERE user_id=?",
+          u.id,
+        )
+      ).map((a) => [a.problem_id, a.solved_at]),
+    );
     return json({
       topics: ["ทั้งหมด", ...new Set(rows.map((r) => s.parse(r).topic))],
       problems: rows.map((r) => {
@@ -453,18 +598,22 @@ async function route(request: Request, env: Env): Promise<Response> {
           status = st.get(p.id);
         return {
           id: p.id,
+          published: !!r.published,
           title: p.title,
           sub: p.sub,
           level: p.level,
           topic: p.topic,
           kind: p.kind,
           points: pointsFor(p),
+          dueAt: due.get(p.id) ?? r.due_at,
+          solvedAt: solves.get(p.id) ?? null,
           status: status?.st ?? "todo",
           passed: status?.passed,
           total: status?.total,
         };
       }),
     });
+  }
   const pm =
     /^\/problems\/(\d+)(?:\/(draft|test|submit|try|answer|reveal))?$/.exec(
       path,
@@ -610,12 +759,14 @@ async function route(request: Request, env: Env): Promise<Response> {
       week = await s.ranking(
         periodStart("week"),
         Number.MAX_SAFE_INTEGER,
-        u.section,
+        undefined,
+        u.class_id ?? -1,
       ),
       prev = await s.ranking(
         periodStart("week") - 7 * DAY,
         periodStart("week"),
-        u.section,
+        undefined,
+        u.class_id ?? -1,
       ),
       me = all.find((x) => x.id === u.id),
       rank = week.find((x) => x.id === u.id)?.rank ?? null,
@@ -635,7 +786,7 @@ async function route(request: Request, env: Env): Promise<Response> {
           (r) => r.id === last.problem_id && st.get(r.id)?.st !== "done",
         );
     return json({
-      user: s.userJson(u, await s.year()),
+      user: await classroom.userJson(u),
       points: me?.points ?? 0,
       passed: rows.filter((r) => st.get(r.id)?.st === "done").length,
       total: rows.length,
@@ -662,8 +813,12 @@ async function route(request: Request, env: Env): Promise<Response> {
         : "week",
       scope = url.searchParams.get("scope") === "all" ? "all" : "section";
     const from = periodStart(period),
-      section = scope === "section" ? u.section : undefined,
-      rank = await s.ranking(from, Number.MAX_SAFE_INTEGER, section),
+      rank = await s.ranking(
+        from,
+        Number.MAX_SAFE_INTEGER,
+        undefined,
+        scope === "section" ? (u.class_id ?? -1) : undefined,
+      ),
       me = rank.find((r) => r.id === u.id),
       above = me ? [...rank].reverse().find((r) => r.points > me.points) : null,
       next = rows.find((r) => st.get(r.id)?.st !== "done");
@@ -674,9 +829,14 @@ async function route(request: Request, env: Env): Promise<Response> {
             ? periodStart("month", from - DAY)
             : 0,
       priorTo = period === "all" ? Date.now() - 7 * DAY : from,
-      before = (await s.ranking(priorFrom, priorTo, section)).find(
-        (r) => r.id === u.id,
-      );
+      before = (
+        await s.ranking(
+          priorFrom,
+          priorTo,
+          undefined,
+          scope === "section" ? (u.class_id ?? -1) : undefined,
+        )
+      ).find((r) => r.id === u.id);
     return json({
       period,
       scope,
@@ -717,7 +877,12 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
   try {
     return await route(request, env);
   } catch (e) {
-    if (e instanceof HttpError) return json({ error: e.message }, e.status);
+    if (
+      e instanceof HttpError ||
+      e instanceof ClassroomError ||
+      e instanceof GoogleLoginError
+    )
+      return json({ error: e.message }, e.status);
     if (
       e instanceof Error &&
       /^(รหัสผ่าน|ข้อมูลโจทย์|เลือกภาษา|กรอก |ชื่อฟังก์ชัน|ระดับความยาก|คะแนนต้อง|พารามิเตอร์|กำหนดผลลัพธ์|ต้องมี |ค่า hidden|เคส |พอร์ต |allowedRegs|เฉลยต้อง)/.test(

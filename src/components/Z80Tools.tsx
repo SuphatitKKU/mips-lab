@@ -2,7 +2,7 @@
 // program's labels to jump to, how much of the 8 KB EPROM the program takes,
 // the project bar (.asm / .json import and export, examples) and the serial terminal.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { Board } from '../lib/z80/board';
 import { EXAMPLES } from '../lib/z80/examples';
 import { Icon, ICON } from './Icon';
@@ -95,6 +95,7 @@ export function ProjectBar({
   code,
   onOpen,
   fresh,
+  extra,
 }: {
   name: string;
   onName: (n: string) => void;
@@ -103,6 +104,8 @@ export function ProjectBar({
   onOpen: (p: { board: Board; code: string }) => void;
   /** what "โปรเจกต์ใหม่" starts from */
   fresh: { board: Board; code: string };
+  /** more buttons after download (e.g. "ส่งให้อาจารย์" for students) */
+  extra?: ReactNode;
 }) {
   const popup = usePopup();
   const fileIn = useRef<HTMLInputElement>(null);
@@ -157,6 +160,7 @@ export function ProjectBar({
         <Icon d={ICON.download} size={15} />
         ดาวน์โหลด
       </button>
+      {extra}
       <Menu
         label="ตัวเลือกโปรเจกต์"
         items={[

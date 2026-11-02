@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../api';
+import { useAuth } from '../auth';
+import { dueText } from '../components/DueChip';
+import { SubmitToTeacher } from '../components/Z80Submit';
 import { CodeEditor, type LineMark } from '../components/CodeEditor';
 import { FILL, Icon, ICON } from '../components/Icon';
 import { PartDefs, PartModel, PartThumb, type ModelState } from '../components/PartModels';
@@ -338,6 +341,10 @@ export function Z80Board() {
   const [params] = useSearchParams();
   const problemId = params.get('problem') ? Number(params.get('problem')) : null;
   const wantAnswer = params.get('answer') === '1';
+  // teacher opening a student's hand-in: shown on the board, never saved over the teacher's own work
+  const subId = params.get('submission') ? Number(params.get('submission')) : null;
+  const { isTeacher } = useAuth();
+  const [viewing, setViewing] = useState<{ student: { name: string; studentId: string }; project: { title: string }; submittedAt: number; late: boolean; note: string; name: string } | null>(null);
   const saved = useMemo(loadSaved, []);
 
   const [board, setBoard] = useState<Board>(saved.board);
@@ -407,12 +414,35 @@ export function Z80Board() {
     }
   }, [view]);
   useEffect(() => {
+    if (subId) return; // a student's hand-in on screen: leave the teacher's saved board alone
     try {
       localStorage.setItem(STORE, JSON.stringify({ v: 2, board, code: problemId ? saved.code : code, name: projName }));
     } catch {
       /* ignore */
     }
-  }, [board, code, problemId, saved.code, projName]);
+  }, [board, code, problemId, saved.code, projName, subId]);
+
+  // open a student's hand-in (teacher)
+  useEffect(() => {
+    if (!subId) return;
+    let live = true;
+    api<{ submission: { board: Board; code: string; name: string; note: string; submittedAt: number; late: boolean; student: { name: string; studentId: string }; project: { title: string } } }>(`/teacher/submissions/${subId}`)
+      .then(({ submission: s }) => {
+        if (!live) return;
+        if (!isPinBoard(s.board)) return popup.toast('บอร์ดในงานนี้เป็นรูปแบบเก่า เปิดไม่ได้', 'err');
+        setRunning(false);
+        setBoard(s.board);
+        setCode(s.code);
+        setProjName(s.name);
+        setSelId(s.board.parts.find((x) => x.type === 'KIT')?.id ?? null);
+        setViewing(s);
+      })
+      .catch((e: ApiError) => live && popup.toast(e.message, 'err'));
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subId]);
 
   // Esc leaves the full-screen editor
   useEffect(() => {
@@ -962,8 +992,35 @@ export function Z80Board() {
           <Icon d={ICON.info} size={18} />
           <span>บอร์ดนี้ต้องต่อสายที่ขาชิปเล็กๆ — ใช้บนคอมพิวเตอร์หรือแท็บเล็ตแนวนอนจะสะดวกกว่า บนมือถือยังดูวงจรและรันโปรแกรมได้ตามปกติ</span>
         </div>
-        {!problem && (
-          <ProjectBar name={projName} onName={setProjName} board={board} code={code} onOpen={openProject} fresh={{ board: DEFAULT_BOARD, code: DEFAULT_CODE }} />
+        {subId && (
+          <section aria-label="งานที่นักศึกษาส่ง" className="notice info" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
+            <Icon d={ICON.eye} size={18} />
+            <span style={{ flex: '1 1 300px' }}>
+              {viewing ? (
+                <>
+                  กำลังดูงาน <b>{viewing.project.title}</b> ของ <b>{viewing.student.name}</b> ({viewing.student.studentId}) · ส่งเมื่อ {dueText(viewing.submittedAt)} น.
+                  {viewing.late ? ' · ส่งช้า' : ''}
+                  {viewing.note ? ` · “${viewing.note}”` : ''} — ลองรันหรือแก้ได้ แต่จะไม่ถูกบันทึก และไม่ทับบอร์ดของคุณ
+                </>
+              ) : (
+                'กำลังโหลดงานของนักศึกษา…'
+              )}
+            </span>
+            <Link to="/teacher" className="btn btn-secondary" style={{ height: 38 }}>
+              กลับหน้าอาจารย์
+            </Link>
+          </section>
+        )}
+        {!problem && !subId && (
+          <ProjectBar
+            name={projName}
+            onName={setProjName}
+            board={board}
+            code={code}
+            onOpen={openProject}
+            fresh={{ board: DEFAULT_BOARD, code: DEFAULT_CODE }}
+            extra={!isTeacher && <SubmitToTeacher name={projName} board={board} code={code} />}
+          />
         )}
         {problem && (
           <section className="card" style={{ padding: '16px 20px', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12 }}>

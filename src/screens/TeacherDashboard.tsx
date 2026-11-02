@@ -1,4 +1,14 @@
-import { useState, type FormEvent, type CSSProperties } from "react";
+import { DataTable } from "../components/DataTable";
+import { ClassesPanel, type ClassRow } from "./TeacherClasses";
+import { StatsPanel, AuditPanel, ProgressModal } from "./TeacherInsights";
+import { ProjectsPanel } from "./TeacherProjects";
+import {
+  exportDocx,
+  exportPdf,
+  type ExportInfo,
+} from "../components/exportList";
+import { classLabel } from "../lib/terms";
+import { useEffect, useState, type FormEvent, type CSSProperties } from "react";
 import { Navigate } from "react-router-dom";
 import { api, ApiError, useApi } from "../api";
 import { useAuth, type Me } from "../auth";
@@ -16,6 +26,8 @@ interface Student extends Me {
   year: number | null;
   yearOverride: number | null;
   entryYear: number | null;
+  assigned: number;
+  onTime: number;
 }
 interface Item {
   problem: Problem;
@@ -24,6 +36,7 @@ interface Item {
   dueAt: number | null;
 }
 interface Overview {
+  classes: ClassRow[];
   academicYear: number;
   students: Student[];
   problems: {
@@ -70,76 +83,73 @@ const date = (t: number | null) =>
       })
     : "—";
 const message = (e: unknown) => (e as ApiError).message;
-function exportCsv(rows: Student[]) {
-  const cell = (v: unknown) =>
-    '"' +
-    String(v ?? "")
-      .replace(/^[=+@-]/, "'$&")
-      .replace(/"/g, '""') +
-    '"';
-  const csv = [
-    [
-      "รหัสนักศึกษา",
-      "ชื่อ",
-      "กลุ่ม",
-      "ชั้นปี",
-      "ปีที่เข้า",
-      "คะแนน",
-      "ผ่าน",
-      "เปิดบัญชี",
-    ],
-    ...rows.map((u) => [
-      u.studentId,
-      u.name,
-      u.section,
-      u.year,
-      u.entryYear,
-      u.points,
-      u.passed,
-      u.active ? "ใช่" : "ไม่",
-    ]),
-  ]
-    .map((r) => r.map(cell).join(","))
-    .join("\r\n");
-  const url = URL.createObjectURL(
-      new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" }),
-    ),
-    a = document.createElement("a");
-  a.href = url;
-  a.download = "mips-lab-scores.csv";
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
 export function Teacher() {
   const { isTeacher } = useAuth(),
     popup = usePopup(),
     data = useApi<Overview>(isTeacher ? "/teacher/overview" : null),
     bank = useApi<{ problems: Item[] }>(isTeacher ? "/teacher/problems" : null);
-  const [tab, setTab] = useState("overview"),
-    [query, setQuery] = useState(""),
-    [section, setSection] = useState(""),
+  const [tab, setTab] = useState("classes"),
+    [classFilter, setClassFilter] = useState(""),
+    [roleFilter, setRoleFilter] = useState("student"),
     [year, setYear] = useState(""),
     [editing, setEditing] = useState<Student | null>(null),
     [adding, setAdding] = useState(false),
     [teacher, setTeacher] = useState(false),
     [problem, setProblem] = useState<Item | null>(null),
     [newProblem, setNewProblem] = useState(false),
-    [report, setReport] = useState<number | null>(null);
+    [report, setReport] = useState<number | null>(null),
+    [version, setVersion] = useState(0),
+    [refreshError, setRefreshError] = useState("");
+  useEffect(() => {
+    setVersion((v) => v + 1);
+  }, [data.data]);
+  useEffect(() => {
+    if (!isTeacher) return;
+    let live = true,
+      inFlight = false;
+    const update = async () => {
+      if (
+        document.visibilityState !== "visible" ||
+        editing ||
+        adding ||
+        problem ||
+        newProblem ||
+        inFlight
+      )
+        return;
+      inFlight = true;
+      try {
+        const d = await api<Overview>("/teacher/overview");
+        if (live) {
+          data.setData(d);
+          setRefreshError("");
+        }
+      } catch (e) {
+        if (live) setRefreshError(message(e));
+      } finally {
+        inFlight = false;
+      }
+    };
+    const timer = window.setInterval(update, 15000);
+    window.addEventListener("focus", update);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", update);
+    };
+  }, [isTeacher, editing, adding, problem, newProblem]);
   if (!isTeacher) return <Navigate to="/" replace />;
   const students = (data.data?.students ?? []).filter(
       (u) => u.role === "student",
     ),
-    sections = [
-      ...new Set(students.map((u) => u.section).filter(Boolean)),
-    ].sort(),
     rows = (data.data?.students ?? []).filter(
       (u) =>
-        (!section || u.section === section) &&
         (!year || String(u.year) === year) &&
-        [u.name, u.studentId, u.section]
-          .join(" ")
-          .toLowerCase()
-          .includes(query.toLowerCase()),
+        (!roleFilter || u.role === roleFilter) &&
+        (!classFilter ||
+          (classFilter === "none"
+            ? u.classId == null
+            : String(u.classId) === classFilter)),
     );
   const refresh = () => {
     data.reload();
@@ -147,12 +157,12 @@ export function Teacher() {
   };
   return (
     <>
-      <PageHeader title="ห้องอาจารย์" sub="สร้างโจทย์ ติดตามผล และดูแลนักศึกษา">
-        <button
-          className="btn btn-secondary"
-          onClick={() => exportCsv(rows.filter((u) => u.role === "student"))}
-        >
-          ส่งออกคะแนน CSV
+      <PageHeader
+        title="ห้องอาจารย์"
+        sub="ห้องเรียน งานมอบหมาย และคะแนน · อัปเดตทุก 15 วินาที"
+      >
+        <button className="btn btn-secondary" onClick={refresh}>
+          รีเฟรชข้อมูล
         </button>
         <button
           className="btn btn-primary"
@@ -167,6 +177,15 @@ export function Teacher() {
       </PageHeader>
       <main className="main" style={{ gap: 24 }}>
         {data.error && <ErrorBox error={data.error} onRetry={refresh} />}
+        {refreshError && (
+          <ErrorBox
+            error={{ message: `ข้อมูลล่าสุดอัปเดตไม่สำเร็จ: ${refreshError}` }}
+            onRetry={() => {
+              setRefreshError("");
+              refresh();
+            }}
+          />
+        )}
         <div className="teacher-stats" style={grid}>
           {[
             ["นักศึกษาทั้งหมด", students.length],
@@ -197,16 +216,40 @@ export function Teacher() {
             </div>
           ))}
         </div>
-        <Segmented
-          label="จัดการห้องเรียน"
-          value={tab}
-          onChange={setTab}
-          options={[
-            { value: "overview", label: "ภาพรวม" },
-            { value: "students", label: "นักศึกษาและคะแนน" },
-            { value: "problems", label: "จัดการโจทย์" },
-          ]}
-        />
+        <div className="classroom-tabs">
+          <Segmented
+            label="จัดการห้องเรียน"
+            value={tab}
+            onChange={setTab}
+            options={[
+              { value: "classes", label: "ห้องเรียน" },
+              { value: "overview", label: "ภาพรวม" },
+              { value: "projects", label: "โปรเจกต์ Z80" },
+              { value: "students", label: "นักศึกษาและคะแนน" },
+              { value: "problems", label: "จัดการโจทย์" },
+            ]}
+          />
+        </div>
+        {tab === "classes" && (
+          <>
+            <ClassesPanel
+              classes={data.data?.classes ?? []}
+              unassigned={students.filter((u) => u.classId == null).length}
+              onSaved={refresh}
+              onDeleted={refresh}
+              onRoster={refresh}
+              onShow={(filter) => {
+                setClassFilter(
+                  filter === "none" ? "none" : filter.replace("c:", ""),
+                );
+                setTab("students");
+              }}
+            />
+          </>
+        )}
+        {tab === "projects" && (
+          <ProjectsPanel classes={data.data?.classes ?? []} version={version} />
+        )}
         {tab === "overview" && (
           <>
             <section className="card" style={card}>
@@ -255,59 +298,94 @@ export function Teacher() {
             </section>
             <section className="card" style={card}>
               <h2>ผลการทำโจทย์</h2>
-              <div className="teacher-scroll">
-                <table className="teacher-table">
-                  <thead>
-                    <tr>
-                      <th>โจทย์</th>
-                      <th>กลุ่ม</th>
-                      <th>สถานะ</th>
-                      <th>เริ่มทำ</th>
-                      <th>ผ่าน</th>
-                      <th>กำหนดส่ง</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.data?.problems.map((p) => (
-                      <tr key={p.id}>
-                        <td>
-                          #{p.id} {p.title}
-                        </td>
-                        <td>{p.section || "ทุกกลุ่ม"}</td>
-                        <td>{p.published ? "เผยแพร่" : "ฉบับร่าง"}</td>
-                        <td>{p.attempted}</td>
-                        <td>{p.solved}</td>
-                        <td>{date(p.due_at)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <DataTable
+                label="ผลการทำโจทย์"
+                rows={data.data?.problems ?? []}
+                rowKey={(p) => p.id}
+                loading={data.loading}
+                searchLabel="ค้นหาโจทย์"
+                filename="exercise-results.csv"
+                columns={[
+                  { id: "id", title: "ข้อ", value: (p) => p.id, numeric: true },
+                  {
+                    id: "title",
+                    title: "โจทย์",
+                    value: (p) => p.title,
+                    cell: (p) => <strong>{p.title}</strong>,
+                  },
+                  {
+                    id: "section",
+                    title: "กลุ่ม",
+                    value: (p) => p.section || "ทุกกลุ่ม",
+                  },
+                  {
+                    id: "status",
+                    title: "สถานะ",
+                    value: (p) => (p.published ? "เผยแพร่" : "ฉบับร่าง"),
+                    cell: (p) => (
+                      <span className={`dt-badge ${p.published ? "live" : ""}`}>
+                        {p.published ? "เผยแพร่" : "ฉบับร่าง"}
+                      </span>
+                    ),
+                  },
+                  {
+                    id: "attempted",
+                    title: "เริ่มทำ",
+                    value: (p) => p.attempted,
+                    numeric: true,
+                  },
+                  {
+                    id: "solved",
+                    title: "ผ่าน",
+                    value: (p) => p.solved,
+                    numeric: true,
+                  },
+                  {
+                    id: "due",
+                    title: "กำหนดส่ง",
+                    value: (p) => p.due_at,
+                    exportValue: (p) => date(p.due_at),
+                    cell: (p) => date(p.due_at),
+                  },
+                ]}
+              />
             </section>
+            <StatsPanel
+              ids={rows.filter((u) => u.role === "student").map((u) => u.id)}
+              version={version}
+            />
+            <AuditPanel version={version} />
           </>
         )}
         {tab === "students" && (
           <>
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-              <input
-                className="input"
-                aria-label="ค้นหานักศึกษา"
-                placeholder="ค้นหาชื่อ รหัส หรือกลุ่ม"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                style={{ flex: "1 1 250px" }}
-              />
               <select
                 className="input"
-                aria-label="กรองกลุ่มเรียน"
-                value={section}
-                onChange={(e) => setSection(e.target.value)}
-                style={{ width: 180 }}
+                aria-label="กรองห้องเรียน"
+                value={classFilter}
+                onChange={(e) => setClassFilter(e.target.value)}
+                style={{ width: 240 }}
               >
-                <option value="">ทุกกลุ่ม</option>
-                {sections.map((s) => (
-                  <option key={s}>{s}</option>
+                <option value="">ทุกห้องเรียน</option>
+                <option value="none">ยังไม่ได้เข้าห้อง</option>
+                {data.data?.classes.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {classLabel(c)}
+                    {c.archived ? " · ปิดแล้ว" : ""}
+                  </option>
                 ))}
+              </select>
+              <select
+                className="input"
+                aria-label="กรองบทบาท"
+                value={roleFilter}
+                onChange={(e) => setRoleFilter(e.target.value)}
+                style={{ width: 160 }}
+              >
+                <option value="student">นักศึกษา</option>
+                <option value="teacher">อาจารย์</option>
+                <option value="">ทุกบทบาท</option>
               </select>
               <select
                 className="input"
@@ -346,6 +424,7 @@ export function Teacher() {
               <AccountForm
                 key={editing?.id ?? (teacher ? "teacher" : "new")}
                 user={editing}
+                classes={data.data?.classes ?? []}
                 teacher={editing ? editing.role === "teacher" : teacher}
                 onCancel={() => {
                   setEditing(null);
@@ -360,75 +439,160 @@ export function Teacher() {
             )}
             <section className="card" style={card}>
               <h2>รายชื่อและคะแนน · {rows.length} คน</h2>
-              <div className="teacher-scroll">
-                <table className="teacher-table">
-                  <thead>
-                    <tr>
-                      <th>ชื่อ / รหัส</th>
-                      <th>กลุ่ม</th>
-                      <th>รุ่น / ชั้นปี</th>
-                      <th>คะแนน</th>
-                      <th>ผ่าน</th>
-                      <th>ใช้งานล่าสุด</th>
-                      <th>จัดการ</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rows.map((u) => (
-                      <tr key={u.id}>
-                        <td>
+              <DataTable
+                label="รายชื่อและคะแนน"
+                rows={rows}
+                rowKey={(u) => u.id}
+                loading={data.loading}
+                searchLabel="ค้นหานักศึกษา"
+                filename="student-scores.csv"
+                defaultSort={{ id: "studentId", desc: false }}
+                empty="ยังไม่มีนักศึกษาในกลุ่มนี้"
+                extraActions={(filtered) => {
+                  const info: ExportInfo = {
+                    title: classFilter
+                      ? (data.data?.classes.find(
+                          (c) => String(c.id) === classFilter,
+                        )?.name ?? "รายชื่อที่กรอง")
+                      : "รายชื่อนักศึกษา",
+                    totalProblems: data.data?.problems.length ?? 0,
+                    rows: filtered.filter((u) => u.role === "student"),
+                  };
+                  const download = async (kind: "docx" | "pdf") => {
+                    try {
+                      if (kind === "docx") await exportDocx(info);
+                      else await exportPdf(info);
+                    } catch (e) {
+                      popup.toast(message(e), "err");
+                    }
+                  };
+                  return (
+                    <>
+                      <button
+                        type="button"
+                        className="btn btn-secondary dt-export"
+                        disabled={!info.rows.length}
+                        onClick={() => download("docx")}
+                      >
+                        Word
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary dt-export"
+                        disabled={!info.rows.length}
+                        onClick={() => download("pdf")}
+                      >
+                        PDF
+                      </button>
+                    </>
+                  );
+                }}
+                columns={[
+                  {
+                    id: "name",
+                    title: "ชื่อ–นามสกุล",
+                    value: (u) => u.name,
+                    cell: (u) => (
+                      <div className="dt-person">
+                        <span className="dt-avatar">{u.initials}</span>
+                        <span>
                           <strong>{u.name}</strong>
-                          <br />
-                          {u.studentId}{" "}
-                          {!u.active && (
-                            <span className="chip chip-soft">ปิดบัญชี</span>
-                          )}
-                        </td>
-                        <td>
-                          {u.role === "teacher"
-                            ? "อาจารย์"
-                            : u.section || "ยังไม่จัดกลุ่ม"}
-                        </td>
-                        <td>
-                          {u.role === "teacher"
-                            ? "—"
-                            : `รุ่น ${u.entryYear ?? "—"} / ปี ${u.year ?? "—"}`}
-                        </td>
-                        <td>{u.points}</td>
-                        <td>{u.passed}</td>
-                        <td>{date(u.lastActive)}</td>
-                        <td>
-                          <div style={{ display: "flex", gap: 8 }}>
-                            <button
-                              className="btn btn-soft"
-                              onClick={() => {
-                                setEditing(u);
-                                setAdding(false);
-                              }}
-                            >
-                              แก้ไข
-                            </button>
-                            {u.role === "student" && (
-                              <button
-                                className="btn btn-ghost"
-                                onClick={() => setReport(u.id)}
-                              >
-                                ดูผลรายคน
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {!rows.length && (
-                  <p>
-                    ยังไม่มีรายชื่อที่ตรงกับตัวกรอง
-                    เพิ่มนักศึกษาเพื่อเริ่มใช้งาน
-                  </p>
-                )}
-              </div>
+                          <small>{u.studentId}</small>
+                        </span>
+                      </div>
+                    ),
+                  },
+                  {
+                    id: "studentId",
+                    title: "รหัสนักศึกษา",
+                    value: (u) => u.studentId,
+                  },
+                  {
+                    id: "section",
+                    title: "ห้องเรียน",
+                    value: (u) =>
+                      u.role === "teacher"
+                        ? "อาจารย์"
+                        : u.section || "ยังไม่ได้เข้าห้อง",
+                  },
+                  {
+                    id: "year",
+                    title: "ชั้นปี",
+                    value: (u) => (u.role === "teacher" ? null : u.year),
+                    numeric: true,
+                  },
+                  {
+                    id: "points",
+                    title: "คะแนน",
+                    value: (u) => u.points,
+                    numeric: true,
+                    cell: (u) => (
+                      <strong className="dt-score">
+                        {u.points.toLocaleString("th-TH")}
+                      </strong>
+                    ),
+                  },
+                  {
+                    id: "passed",
+                    title: "ผ่าน",
+                    value: (u) => u.passed,
+                    numeric: true,
+                  },
+                  {
+                    id: "onTime",
+                    title: "งานตรงเวลา",
+                    value: (u) => u.onTime,
+                    numeric: true,
+                    cell: (u) =>
+                      u.assigned ? `${u.onTime}/${u.assigned}` : "—",
+                  },
+                  {
+                    id: "active",
+                    title: "บัญชี",
+                    value: (u) => (u.active ? "เปิดใช้งาน" : "ปิดบัญชี"),
+                    cell: (u) => (
+                      <span className={`dt-badge ${u.active ? "live" : ""}`}>
+                        {u.active ? "เปิดใช้งาน" : "ปิดบัญชี"}
+                      </span>
+                    ),
+                  },
+                  {
+                    id: "lastActive",
+                    title: "ใช้งานล่าสุด",
+                    value: (u) => u.lastActive,
+                    exportValue: (u) => date(u.lastActive),
+                    cell: (u) => date(u.lastActive),
+                  },
+                  {
+                    id: "actions",
+                    title: "จัดการ",
+                    value: () => "",
+                    sortable: false,
+                    exportable: false,
+                    cell: (u) => (
+                      <div className="dt-actions">
+                        <button
+                          className="btn btn-soft"
+                          onClick={() => {
+                            setEditing(u);
+                            setAdding(false);
+                          }}
+                        >
+                          แก้ไข
+                        </button>
+                        {u.role === "student" && (
+                          <button
+                            className="btn btn-ghost"
+                            onClick={() => setReport(u.id)}
+                          >
+                            ดูผลรายคน
+                          </button>
+                        )}
+                      </div>
+                    ),
+                  },
+                ]}
+              />
             </section>
             {report !== null && (
               <StudentReport id={report} onClose={() => setReport(null)} />
@@ -466,7 +630,9 @@ export function Teacher() {
               <ProblemEditor
                 key={problem?.problem.id ?? "new"}
                 item={problem}
-                sections={sections}
+                sections={[
+                  ...new Set(data.data?.classes.map((c) => c.name) ?? []),
+                ]}
                 onCancel={() => {
                   setNewProblem(false);
                   setProblem(null);
@@ -478,7 +644,7 @@ export function Teacher() {
                 }}
               />
             )}
-            <div style={grid}>
+            <div style={grid} data-tour="problem-bank">
               {bank.data?.problems.map((item) => (
                 <section className="card" style={card} key={item.problem.id}>
                   <span className="chip chip-soft">
@@ -511,11 +677,13 @@ export function Teacher() {
   );
 }
 function AccountForm({
+  classes,
   user,
   teacher,
   onSaved,
   onCancel,
 }: {
+  classes: ClassRow[];
   user: Student | null;
   teacher: boolean;
   onSaved: () => void;
@@ -532,7 +700,9 @@ function AccountForm({
       body: Record<string, unknown> = {
         name: f.get("name"),
         studentId: f.get("studentId"),
-        section: f.get("section") ?? "",
+        ...(teacher
+          ? {}
+          : { classId: f.get("classId") ? Number(f.get("classId")) : null }),
       };
     if (f.get("password")) body.password = f.get("password");
     if (user) {
@@ -585,14 +755,22 @@ function AccountForm({
         {!teacher && (
           <>
             <label className="field">
-              กลุ่มเรียน
-              <input
+              ห้องเรียน
+              <select
                 className="input"
-                name="section"
-                defaultValue={user?.section}
-                maxLength={40}
-                placeholder="SEC 1"
-              />
+                name="classId"
+                defaultValue={user?.classId ?? ""}
+              >
+                <option value="">ยังไม่จัดห้อง</option>
+                {classes
+                  .filter((c) => !c.archived || c.id === user?.classId)
+                  .map((c) => (
+                    <option key={c.id} value={c.id} disabled={c.archived}>
+                      {classLabel(c)}
+                      {c.archived ? " · ปิดแล้ว" : ""}
+                    </option>
+                  ))}
+              </select>
             </label>
             {user && (
               <label className="field">
@@ -962,6 +1140,7 @@ function ProblemEditor({
   );
 }
 function StudentReport({ id, onClose }: { id: number; onClose: () => void }) {
+  const [showProgress, setShowProgress] = useState(false);
   const { data, error, reload } = useApi<Report>(`/teacher/users/${id}/report`);
   return (
     <section className="card" style={card}>
@@ -973,6 +1152,12 @@ function StudentReport({ id, onClose }: { id: number; onClose: () => void }) {
         }}
       >
         <h2>ผลรายคน · {data?.user.name ?? "กำลังโหลด…"}</h2>
+        <button
+          className="btn btn-secondary"
+          onClick={() => setShowProgress(true)}
+        >
+          ความคืบหน้ารายข้อ
+        </button>
         <button className="btn btn-ghost" onClick={onClose}>
           ปิด
         </button>
@@ -983,11 +1168,34 @@ function StudentReport({ id, onClose }: { id: number; onClose: () => void }) {
         {data?.solves.reduce((a, s) => a + s.points, 0) ?? 0} ·
         ประวัติล่าสุดไม่เกิน 200 ครั้ง
       </p>
-      {data?.solves.map((s) => (
-        <span key={s.problem_id}>
-          โจทย์ #{s.problem_id} · {s.points} คะแนน · {date(s.solved_at)}
-        </span>
-      ))}
+      <DataTable
+        label="คะแนนรายข้อ"
+        rows={data?.solves ?? []}
+        rowKey={(s) => s.problem_id}
+        loading={!data && !error}
+        filename={`student-${id}-scores.csv`}
+        columns={[
+          {
+            id: "problem",
+            title: "โจทย์",
+            value: (s) => s.problem_id,
+            numeric: true,
+          },
+          {
+            id: "points",
+            title: "คะแนน",
+            value: (s) => s.points,
+            numeric: true,
+          },
+          {
+            id: "solvedAt",
+            title: "ผ่านเมื่อ",
+            value: (s) => s.solved_at,
+            exportValue: (s) => date(s.solved_at),
+            cell: (s) => date(s.solved_at),
+          },
+        ]}
+      />
       {data?.attempts.map((a) => (
         <details key={a.id} className="card" style={{ padding: 16 }}>
           <summary>
@@ -1011,6 +1219,9 @@ function StudentReport({ id, onClose }: { id: number; onClose: () => void }) {
         </details>
       ))}
       {data && !data.attempts.length && <p>ยังไม่มีประวัติทำโจทย์</p>}
+      {showProgress && (
+        <ProgressModal userId={id} onClose={() => setShowProgress(false)} />
+      )}
     </section>
   );
 }

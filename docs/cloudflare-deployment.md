@@ -59,7 +59,7 @@ npx wrangler d1 export mips-lab-db --remote --output private/backup.sql
 - ล็อก login หลังผิด 5 ครั้งต่อ IP+username เป็นเวลา 10 นาที บันทึกใน D1
 - Teacher endpoints ตรวจ role บน server; การเรียกด้วยบัญชีนักศึกษาถูกปฏิเสธ
 - เคสซ่อนและเฉลยไม่ออกใน API โจทย์นักศึกษา; ผลเคสซ่อนแสดงเฉพาะผ่าน/ไม่ผ่าน
-- Endpoint dev login ไม่ถูกเปิดใน Pages Functions; Google OAuth ยังปิดอยู่
+- Endpoint dev login ไม่ถูกเปิดใน Pages Functions; Google Login ใช้ Firebase Auth ตาม [คู่มือ](firebase-google-login.md) โดยข้อมูลยังเก็บใน D1 เดิม
 - Local และ remote D1 แยกกัน; E2E ไม่แตะฐานข้อมูล production
 - `npm test` ตรวจ compiler/CPU/grader และกติกาห้องเรียน; `npm run test:e2e` ตรวจ API กับ local D1 และ browser desktop/mobile
 

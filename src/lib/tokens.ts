@@ -1,37 +1,37 @@
-// Design tokens — one maroon hue in light-to-dark steps on warm neutrals.
+// Design tokens — neutral surfaces and text; red is reserved for primary actions.
 // Emphasis comes from lightness and weight, not from extra hues.
-export const INK = '#2a1f1f';
-export const MUTED = '#75686a';
-export const TERTIARY = '#9a8d8a';
-export const LINE_NO = '#b5a8a4';
-export const BODY_ALT = '#5a4d4f';
+export const INK = '#202020';
+export const MUTED = '#6b6b6b';
+export const TERTIARY = '#8a8a8a';
+export const LINE_NO = '#a8a8a8';
+export const BODY_ALT = '#505050';
 
-export const M = '#8a1c1c'; // brand maroon
-export const M_HOVER = '#731515';
-export const M_DEEP = '#6e1414'; // text on maroon tints
-export const M_MID = '#b5524c'; // secondary marks: progress, pending, numbers
-export const M_LINE = '#e6c3be'; // borders on maroon tints
-export const MT = '#f9ecea'; // maroon soft tint
-export const MS = '#f2d6d2'; // maroon selected / highlighted
-export const M_ON = '#f6dcd8'; // text on maroon
-export const M_ROW = '#fcf6f5'; // faint row highlight
+export const M = '#262626'; // neutral emphasis
+export const M_HOVER = '#171717';
+export const M_DEEP = '#1c1c1c'; // text on neutral tints
+export const M_MID = '#737373'; // secondary marks: progress, pending, numbers
+export const M_LINE = '#dedede'; // borders on neutral tints
+export const MT = '#f3f3f3'; // neutral soft tint
+export const MS = '#e7e7e7'; // neutral selected / highlighted
+export const M_ON = '#e8e8e8'; // text on dark surfaces
+export const M_ROW = '#fafafa'; // faint row highlight
 
-// Status colours sit outside the brand hue so success never looks like an error.
-export const OK = '#2e7d4f';
-export const OK_DEEP = '#1f5c38';
-export const OK_BG = '#e6f2ea';
+// Status icons and labels distinguish outcomes; errors retain a red accent.
+export const OK = '#424242';
+export const OK_DEEP = '#262626';
+export const OK_BG = '#f0f0f0';
 export const ERR = '#c62828';
 export const ERR_DEEP = '#a11b1b';
 export const ERR_BG = '#fdeaea';
-export const WARN_DEEP = '#8a4b06';
-export const WARN_BG = '#fdf1df';
+export const WARN_DEEP = '#424242';
+export const WARN_BG = '#f3f3f3';
 
-export const PAGE = '#f8f5f2';
-export const SOFT = '#f4efec';
-export const TRACK = '#efe8e4';
-export const RING = '#e6dcd7';
-export const CANVAS = '#fbf9f7';
+export const PAGE = '#f7f7f7';
+export const SOFT = '#f2f2f2';
+export const TRACK = '#ebebeb';
+export const RING = '#dedede';
+export const CANVAS = '#fafafa';
 
 export const MONO = "'JetBrains Mono', monospace";
-export const HEAD = "'Mitr', 'Anuphan', sans-serif";
+export const HEAD = "'Anuphan', system-ui, sans-serif";
 export const BODY = "'Anuphan', sans-serif";

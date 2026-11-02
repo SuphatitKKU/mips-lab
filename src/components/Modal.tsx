@@ -17,9 +17,13 @@ interface ModalProps {
   className?: string;
   /** change it when the content is swapped (e.g. loading → result) to move focus to the new main action */
   focusKey?: string | number;
+  /** A selector inside this dialog to focus when it opens. */
+  initialFocus?: string;
+  /** Explicit opener when the background becomes inert while this dialog is open. */
+  restoreFocusTo?: HTMLElement | null;
 }
 
-export function Modal({ title, onClose, children, footer, wide, className, focusKey }: ModalProps) {
+export function Modal({ title, onClose, children, footer, wide, className, focusKey, initialFocus, restoreFocusTo }: ModalProps) {
   const backdrop = useRef<HTMLDivElement>(null);
   const card = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
@@ -27,7 +31,7 @@ export function Modal({ title, onClose, children, footer, wide, className, focus
 
   // runs before the focus effect below, so `before` is still whatever opened the popup
   useEffect(() => {
-    const before = document.activeElement as HTMLElement | null;
+    const before = restoreFocusTo ?? document.activeElement as HTMLElement | null;
     const onKey = (e: KeyboardEvent) => (e.key === 'Escape' ? closeRef.current() : trapTab(e, backdrop.current));
     window.addEventListener('keydown', onKey);
     const overflow = document.body.style.overflow;
@@ -42,8 +46,8 @@ export function Modal({ title, onClose, children, footer, wide, className, focus
   // focus the main action in the footer, else the close button
   useEffect(() => {
     const q = (sel: string) => card.current?.querySelector<HTMLElement>(sel);
-    (q('.modal-foot .btn-primary') ?? q('.modal-foot .btn') ?? q('.modal-x'))?.focus();
-  }, [focusKey]);
+    ((initialFocus ? q(initialFocus) : null) ?? q('.modal-foot .btn-primary') ?? q('.modal-foot .btn') ?? q('.modal-x'))?.focus();
+  }, [focusKey, initialFocus]);
 
   // rendered at the top of the page so a transformed or clipped ancestor can't trap the fixed backdrop
   return createPortal(

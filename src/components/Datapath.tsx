@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as RPointerEvent, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { hex, type Kind, type StepInfo } from '../lib/mips/cpu';
 import { FILL, Icon, ICON } from './Icon';
@@ -95,6 +95,11 @@ const VW = 800;
 const VH = 340;
 
 const ALL = new Set<string>([...Object.keys(UNITS), ...Object.keys(WIRES)]);
+type ValueSources = Record<Unit | Wire | 'regWrite' | 'pcNext', StepInfo | null>;
+
+function sourcesFor(step: StepInfo | null): ValueSources {
+  return Object.fromEntries([...ALL, 'regWrite', 'pcNext'].map((k) => [k, step])) as ValueSources;
+}
 
 /** ms for a signal to cross one wire at 1× speed */
 const TICK = 210;
@@ -307,12 +312,12 @@ function inside(u: Unit, s: StepInfo, on: Set<string>, fmt: (v: number) => strin
 }
 
 /** A module's value lines, under its name (roomy modules) or in place of its subtitle (small ones). */
-function Lines({ u, lines, top, style }: { u: Unit; lines: Line[]; top: boolean; style?: CSSProperties | ((l: Line) => CSSProperties) }) {
+function Lines({ u, lines, top }: { u: Unit; lines: Line[]; top: boolean }) {
   const b = UNITS[u];
   const max = b.w - 10;
   const y0 = top ? b.y + (b.sub ? 56 : 48) : b.y + b.h / 2 + 14;
   return (
-    <g pointerEvents="none" style={typeof style === 'object' ? style : undefined}>
+    <g pointerEvents="none">
       {lines.map((l, i) => {
         const natural = l.text.length * 7.2 + 2;
         return (
@@ -325,7 +330,6 @@ function Lines({ u, lines, top, style }: { u: Unit; lines: Line[]; top: boolean;
             fontWeight={l.edge ? 700 : 600}
             fill={l.edge ? 'var(--m)' : 'var(--m-deep)'}
             {...(natural > max ? { textLength: max, lengthAdjust: 'spacingAndGlyphs' } : {})}
-            style={typeof style === 'function' ? style(l) : undefined}
           >
             {l.text}
           </text>
@@ -383,6 +387,9 @@ export function Datapath({ step, prev, fmt = String, onDone, onNext, heading }: 
   const [replay, setReplay] = useState(0);
   const [speed, setSpeed] = useState<Speed>(savedSpeed);
   const [big, setBig] = useState(false);
+  const [progress, setProgress] = useState({ run: 0, tick: -1 });
+  // Keep what was actually visible, including when Next interrupts a signal.
+  const displayed = useRef<ValueSources>(sourcesFor(prev ?? null));
   useEffect(() => {
     if (!big) return;
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setBig(false);
@@ -399,9 +406,10 @@ export function Datapath({ step, prev, fmt = String, onDone, onNext, heading }: 
     }
   };
   const tick = TICK / speed;
-  // a new key remounts the svg, which restarts every animation in it
+  // Enlarging reparents the SVG into a portal, so restart its value clock too.
   const count = useRef(0);
-  const run = useMemo(() => ++count.current, [step, replay]);
+  const run = useMemo(() => ++count.current, [step, replay, big]);
+  const baseline = useMemo(() => step ? displayed.current : sourcesFor(null), [run]);
   const on = usedBy(step);
   // the picture starts as the previous instruction left it; each part changes when this one's signal reaches it
   const was = step && prev ? usedBy(prev) : new Set<string>();
@@ -418,6 +426,56 @@ export function Datapath({ step, prev, fmt = String, onDone, onNext, heading }: 
   const length = at(end);
   /** tick at which an unused part takes its new value — never after the instruction ends */
   const swept = (t: number | undefined) => Math.min(t ?? 0, end);
+  const arrival = (k: Unit | Wire | 'regWrite' | 'pcNext') => {
+    if (k === 'regWrite') return plan?.start.has('wb-regs') ? plan.start.get('wb-regs')! + 1 : end;
+    if (k === 'pcNext') return end;
+    if (k in UNITS) return plan?.lit.get(k as Unit) ?? swept(sweep?.lit.get(k as Unit));
+    return plan?.start.has(k as Wire) ? plan.start.get(k as Wire)! + 1 : swept((sweep?.start.get(k as Wire) ?? 0) + 0.5);
+  };
+  const elapsed = still ? Infinity : progress.run === run ? progress.tick : -1;
+  const values = sourcesFor(null);
+  for (const k of Object.keys(values) as (keyof ValueSources)[]) values[k] = elapsed >= arrival(k) ? step : baseline[k];
+  useLayoutEffect(() => {
+    displayed.current = values;
+  });
+
+  // The diagram, value cards and hover details all use the same arrival clock.
+  useEffect(() => {
+    if (!step || still) return;
+    const times = [...new Set((Object.keys(values) as (keyof ValueSources)[]).map(arrival))];
+    const timers = times.map((t) => setTimeout(() => setProgress({ run, tick: t }), at(t)));
+    return () => timers.forEach(clearTimeout);
+    // Timing changes create a new run; unrelated renders must not restart it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run]);
+
+  const valueTip = (k: Unit | Wire): Tip => {
+    const s = values[k];
+    const result = describe(k, s, !!s && usedBy(s).has(k), fmt);
+    if (k === 'regs') {
+      const wb = values.regWrite;
+      result.rows = [
+        ...result.rows.filter(([l]) => !l.startsWith('เขียนลง ')),
+        ...(wb?.bus.wb ? [[`เขียนลง ${reg(wb.bus.wb.k)}`, fmt(wb.bus.wb.v)] as Row] : []),
+      ];
+      if (result.rows.length && (!s || !usedBy(s).has(k))) delete result.note;
+    } else if (k === 'pc') {
+      const next = values.pcNext;
+      result.rows = result.rows.filter(([l]) => l !== 'ถัดไป');
+      if (next) result.rows.push(['ถัดไป', addr(next.pcNew)]);
+    }
+    return result;
+  };
+  const valueLines = (u: Unit): Line[] => {
+    const s = values[u];
+    const lines = s ? inside(u, s, usedBy(s), fmt) : [];
+    if (u !== 'regs') return lines;
+    const wb = values.regWrite;
+    return [
+      ...lines.filter((l) => !l.edge),
+      ...(wb ? inside(u, wb, usedBy(wb), fmt).filter((l) => l.edge) : []),
+    ];
+  };
   const unitAnim = (u: Unit, label?: true) => {
     if (!plan || !sweep || u === 'pc') return undefined;
     const now = on.has(u);
@@ -444,7 +502,7 @@ export function Datapath({ step, prev, fmt = String, onDone, onNext, heading }: 
   const leave = (e: RPointerEvent) => {
     if (e.pointerType === 'mouse') setTip(null);
   };
-  const shown = tip && describe(tip.k, step, on.has(tip.k), fmt);
+  const shown = tip && valueTip(tip.k);
   const boxW = box.current?.clientWidth ?? VW;
   // where wires share a stretch (a signal fanning out), the one in use must be drawn on top
   // (fixed for a step: moving nodes while hovering would restart their animations)
@@ -562,12 +620,9 @@ export function Datapath({ step, prev, fmt = String, onDone, onNext, heading }: 
             const b = UNITS[u];
             const active = on.has(u);
             const isMux = u === 'pcmux' || u === 'wbmux';
-            const now = step ? inside(u, step, on, fmt) : [];
-            const old = step && prev ? inside(u, prev, was, fmt) : [];
-            const listed = now.length > 0 || old.length > 0;
+            const lines = valueLines(u);
+            const listed = lines.length > 0;
             const top = listed && ROOMY.has(u);
-            const same = now.map((l) => l.text).join('\n') === old.map((l) => l.text).join('\n');
-            const t = plan?.lit.get(u) ?? swept(sweep?.lit.get(u));
             return (
               <g
                 key={u}
@@ -601,28 +656,18 @@ export function Datapath({ step, prev, fmt = String, onDone, onNext, heading }: 
                 >
                   {b.label}
                 </text>
-                {b.sub && (ROOMY.has(u) || !now.length) && (
+                {b.sub && (ROOMY.has(u) || !lines.length) && (
                   <text
                     x={b.x + b.w / 2}
                     y={top ? b.y + 35 : b.y + b.h / 2 + 13}
                     textAnchor="middle"
                     fontSize={11}
                     fill={active ? '#75686a' : '#b5a8a4'}
-                    // a small module's subtitle returns once the old value has gone
-                    style={!ROOMY.has(u) && old.length ? { animation: `dp-val-in ${tick * 0.6}ms ease-out ${at(t)}ms both` } : undefined}
                   >
                     {b.sub}
                   </text>
                 )}
-                {/* the old value fades out as the new signal reaches the module, the new one fades in */}
-                {same ? (
-                  <Lines u={u} lines={now} top={top} />
-                ) : (
-                  <>
-                    {old.length > 0 && <Lines u={u} lines={old} top={top} style={{ animation: `dp-val-out ${tick * 0.6}ms ease-in ${at(t)}ms both` }} />}
-                    <Lines u={u} lines={now} top={top} style={(l) => ({ animation: `dp-val-in ${tick * 0.6}ms ease-out ${at(l.edge ? end : t)}ms both` })} />
-                  </>
-                )}
+                <Lines u={u} lines={lines} top={top} />
               </g>
             );
           })}
@@ -659,23 +704,23 @@ export function Datapath({ step, prev, fmt = String, onDone, onNext, heading }: 
           </div>
         )}
       </div>
-      {/* every module in the circuit; the ones in use fill in as the signal reaches them, the rest stay empty */}
-      <div key={`vals-${run}`} className="dp-vals" aria-label="ค่าในแต่ละโมดูล">
+      {/* Keep each module's previous values until its new inputs arrive. */}
+      <div className="dp-vals" aria-label="ค่าในแต่ละโมดูล">
         {PANEL.map(([u, name]) => {
-          if (!step || !on.has(u))
+          // The register write row can still hold its old value after the read
+          // inputs have cleared, until the write-back part of the cycle ends.
+          const rows = valueTip(u).rows.filter(([l]) => !(u === 'imem' && l === 'address'));
+          if (!rows.length)
             return (
               <div key={u} className="dp-val idle">
                 <b>{name}</b>
                 <span aria-label="ไม่ได้ใช้">—</span>
               </div>
             );
-          const t = plan?.lit.get(u) ?? 0;
-          // the instruction's address is already in the PC row
-          const rows = describe(u, step, true, fmt).rows.filter(([l]) => !(u === 'imem' && l === 'address'));
           return (
-            <div key={u} className="dp-val" style={u === 'pc' ? undefined : { animation: `dp-val-card ${tick * 3}ms ease-out ${at(t)}ms` }}>
+            <div key={`${u}-${elapsed >= arrival(u) ? run : 'previous'}`} className="dp-val" style={elapsed >= arrival(u) ? { animation: `dp-val-card ${tick * 3}ms ease-out` } : undefined}>
               <b>{name}</b>
-              <span style={u === 'pc' ? undefined : { animation: `dp-val-in ${tick * 0.6}ms ease-out ${at(t)}ms both` }}>
+              <span>
                 {rows.map(([l, v]) => (
                   <span key={l}>
                     <i>{l}</i> {v}

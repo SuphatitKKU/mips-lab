@@ -2,7 +2,6 @@ import { Link } from 'react-router-dom';
 import { useApi } from '../api';
 import { FILL, Icon, ICON } from '../components/Icon';
 import { ErrorBox, PageHeader } from '../components/ui';
-import { M, MT } from '../lib/tokens';
 
 const TOOLS: [title: string, body: string, to: string, icon: keyof typeof ICON][] = [
   ['แปลงโค้ด C ⇄ MIPS', 'เขียน C แล้วดู assembly ที่ได้ หรือวาง MIPS แล้วแปลงกลับเป็น C', '/code?mode=convert', 'convert'],
@@ -46,23 +45,14 @@ export function Home() {
         </span>
       </PageHeader>
 
-      <main className="main" style={{ gap: 36 }}>
+      <main className="main home-main" style={{ gap: 32 }}>
         {error && <ErrorBox error={error} />}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20 }}>
+        <div className="home-overview">
           <section
             aria-label="ทำต่อจากครั้งก่อน"
-            style={{
-              flex: '2 1 480px',
-              minWidth: 0,
-              background: 'var(--m)',
-              color: '#fff',
-              borderRadius: 28,
-              padding: '32px 36px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 16,
-            }}
+            className="home-hero"
           >
+            <div className="home-hero-copy">
             <span
               style={{
                 alignSelf: 'flex-start',
@@ -71,7 +61,7 @@ export function Home() {
                 height: 30,
                 padding: '0 12px',
                 borderRadius: 999,
-                background: 'rgba(255,255,255,.14)',
+                background: 'var(--soft)',
                 fontSize: 13,
                 fontWeight: 500,
                 whiteSpace: 'nowrap',
@@ -89,18 +79,18 @@ export function Home() {
                 aria-valuemin={0}
                 aria-valuemax={me.total}
                 aria-valuenow={passed}
-                style={{ width: '100%', maxWidth: 440, height: 10, borderRadius: 99, background: 'rgba(255,255,255,.22)', overflow: 'hidden' }}
+                style={{ width: '100%', maxWidth: 440, height: 10, borderRadius: 99, background: 'var(--track)', overflow: 'hidden' }}
               >
-                <span style={{ display: 'block', height: '100%', width: `${(passed / total) * 100}%`, borderRadius: 99, background: '#fff' }} />
+                <span style={{ display: 'block', height: '100%', width: `${(passed / total) * 100}%`, borderRadius: 99, background: 'var(--m)' }} />
               </div>
             )}
             {(cont ?? me?.next) && (
-              <span style={{ fontSize: 17, color: 'var(--m-on)' }}>
+              <span style={{ fontSize: 17, color: 'var(--body-alt)' }}>
                 {(cont ?? me?.next)?.title}
                 {cont && cont.total > 0 && <span style={{ fontFamily: 'var(--mono)', fontSize: 14 }}> · {cont.passed}/{cont.total} test</span>}
               </span>
             )}
-            {cont?.failing && <span style={{ fontSize: 15, color: 'var(--m-on)' }}>เคสที่ยังไม่ผ่าน: {cont.failing}</span>}
+            {cont?.failing && <span style={{ fontSize: 15, color: 'var(--body-alt)' }}>เคสที่ยังไม่ผ่าน: {cont.failing}</span>}
             {heroId != null && (
               <Link
                 to={`/problems/${heroId}`}
@@ -119,23 +109,25 @@ export function Home() {
                 <Icon d={ICON.arrowRight} size={18} stroke={2.4} />
               </Link>
             )}
+            </div>
+            <div className="hero-chip" aria-hidden="true"><Icon d={ICON.chip} size={76} stroke={1.2} /><span>LEARN. RUN. UNDERSTAND.</span></div>
           </section>
 
-          <div style={{ flex: '1 1 260px', display: 'flex', flexWrap: 'wrap', gap: 20, minWidth: 0 }}>
+          <div className="home-stats">
             <section
               aria-label="ความคืบหน้า"
               className="card"
               style={{ flex: '1 1 240px', padding: '22px 24px', display: 'flex', alignItems: 'center', gap: 18 }}
             >
               <svg width="76" height="76" viewBox="0 0 84 84" aria-hidden="true" style={{ flex: 'none' }}>
-                <circle cx="42" cy="42" r="34" fill="none" stroke="#f9ecea" strokeWidth="10" />
+                <circle cx="42" cy="42" r="34" fill="none" stroke="var(--mt)" strokeWidth="10" />
                 {passed > 0 && (
                   <circle
                     cx="42"
                     cy="42"
                     r="34"
                     fill="none"
-                    stroke="#8a1c1c"
+                    stroke="var(--m)"
                     strokeWidth="10"
                     strokeLinecap="round"
                     strokeDasharray={`${((RING_C * passed) / total).toFixed(1)} ${RING_C.toFixed(1)}`}
@@ -205,25 +197,11 @@ export function Home() {
         </div>
 
         <section aria-label="เครื่องมือ" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <h2 style={{ fontSize: 21 }}>เครื่องมือ</h2>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 16 }}>
+          <div className="home-section-heading"><div><h2>วันนี้อยากลองอะไร?</h2><p>เลือกเครื่องมือ แล้วเริ่มเรียนรู้ด้วยการลงมือทำ</p></div><span>YOUR WORKSPACE</span></div>
+          <div className="tool-grid">
             {TOOLS.map(([title, body, to, icon]) => (
-              <Link key={to} to={to} className="card card-link">
-                <span
-                  style={{
-                    width: 52,
-                    height: 52,
-                    borderRadius: 16,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    marginBottom: 6,
-                    background: MT,
-                    color: M,
-                  }}
-                >
-                  <Icon d={ICON[icon]} size={26} />
-                </span>
+              <Link key={to} to={to} className={`card card-link tool-card tool-${icon}`}>
+                <div className="tool-preview" aria-hidden="true"><span className="tool-preview-icon"><Icon d={ICON[icon]} size={34} stroke={1.7} /></span><span className="tool-preview-label">{icon === 'convert' ? 'C ⇄ MIPS' : icon === 'sim' ? 'STEP → RUN' : icon === 'problems' ? 'PRACTICE' : 'Z80 LAB'}</span><span className="tool-open"><Icon d={ICON.arrowRight} size={17} /></span></div>
                 <span style={{ fontFamily: 'var(--head)', fontSize: 19, fontWeight: 500, lineHeight: 1.3 }}>{title}</span>
                 <span style={{ fontSize: 15, lineHeight: 1.6, color: 'var(--muted)' }}>{body}</span>
               </Link>

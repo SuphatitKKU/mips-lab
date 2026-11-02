@@ -35,6 +35,7 @@ export function setToken(token: string | null, remember = true) {
 
 /** Fired when the server rejects the session so the app can return to the login page. */
 export const UNAUTHORIZED = 'mipslab:unauthorized';
+export const NEEDS_CLASS = 'mipslab:needs-class';
 
 export async function api<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
   const token = getToken();
@@ -53,6 +54,7 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
+    if (res.status === 403 && data.needsClass) window.dispatchEvent(new Event(NEEDS_CLASS));
     if (res.status === 401 && token) window.dispatchEvent(new Event(UNAUTHORIZED));
     throw new ApiError(res.status, (data as { error?: string }).error ?? `เกิดข้อผิดพลาด (${res.status})`, data);
   }

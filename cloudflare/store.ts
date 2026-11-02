@@ -7,6 +7,8 @@ import { DAY, periodStart, pointsFor, studentYear } from "./domain";
 import { digest, randomToken } from "./password";
 export interface User {
   id: number;
+  class_id: number | null;
+  firebase_uid: string | null;
   student_id: string;
   name: string;
   section: string;
@@ -49,11 +51,14 @@ export class Store {
   userJson(u: User, year: number) {
     return {
       id: u.id,
+      classId: u.class_id,
       studentId: u.student_id,
       name: u.name,
       section: u.section,
       role: u.role,
       email: u.email,
+      googleLinked: !!u.firebase_uid,
+      hasPassword: !!u.pw_hash,
       active: !!u.active,
       year: studentYear(u.student_id, year, u.year_override),
       yearOverride: u.year_override,
@@ -88,8 +93,8 @@ export class Store {
   }
   async problems(u: User) {
     return this.all<ProblemRow>(
-      `SELECT * FROM problems ${u.role === "teacher" ? "" : "WHERE published=1 AND (section='' OR section=?)"} ORDER BY id`,
-      ...(u.role === "teacher" ? [] : [u.section]),
+      `SELECT * FROM problems ${u.role === "teacher" ? "" : "WHERE published=1 AND (section='' OR section=? OR id IN (SELECT problem_id FROM assignments WHERE class_id=?))"} ORDER BY id`,
+      ...(u.role === "teacher" ? [] : [u.section, u.class_id ?? -1]),
     );
   }
   parse(r: ProblemRow): Problem {
@@ -102,7 +107,14 @@ export class Store {
     );
     return r &&
       (u.role === "teacher" ||
-        (r.published && (!r.section || r.section === u.section)))
+        (r.published &&
+          (!r.section ||
+            r.section === u.section ||
+            !!(await this.first(
+              "SELECT 1 FROM assignments WHERE class_id=? AND problem_id=?",
+              u.class_id ?? -1,
+              id,
+            )))))
       ? r
       : null;
   }
@@ -197,10 +209,22 @@ export class Store {
       last: await this.last(u.id, r.id),
       prev: rows[idx - 1]?.id ?? null,
       next: rows[idx + 1]?.id ?? null,
-      dueAt: r.due_at,
+      dueAt:
+        (
+          await this.first<{ due_at: number }>(
+            "SELECT due_at FROM assignments WHERE class_id=? AND problem_id=?",
+            u.class_id ?? -1,
+            r.id,
+          )
+        )?.due_at ?? r.due_at,
     };
   }
-  async ranking(from: number, to = Number.MAX_SAFE_INTEGER, section?: string) {
+  async ranking(
+    from: number,
+    to = Number.MAX_SAFE_INTEGER,
+    section?: string,
+    classId?: number,
+  ) {
     const rows = await this.all<{
       id: number;
       name: string;
@@ -209,10 +233,14 @@ export class Store {
       passed: number;
       last: number;
     }>(
-      `SELECT u.id,u.name,u.section,COALESCE(SUM(s.points),0) points,COUNT(s.problem_id) passed,COALESCE(MAX(s.solved_at),0) last FROM users u LEFT JOIN solves s ON s.user_id=u.id AND s.solved_at>=? AND s.solved_at<? WHERE u.role='student' AND u.active=1 ${section !== undefined ? "AND u.section=?" : ""} GROUP BY u.id ORDER BY points DESC,passed DESC,last,u.id`,
+      `SELECT u.id,u.name,u.section,COALESCE(SUM(s.points),0) points,COUNT(s.problem_id) passed,COALESCE(MAX(s.solved_at),0) last FROM users u LEFT JOIN solves s ON s.user_id=u.id AND s.solved_at>=? AND s.solved_at<? WHERE u.role='student' AND u.active=1 ${classId !== undefined ? "AND u.class_id=?" : section !== undefined ? "AND u.section=?" : ""} GROUP BY u.id ORDER BY points DESC,passed DESC,last,u.id`,
       from,
       to,
-      ...(section !== undefined ? [section] : []),
+      ...(classId !== undefined
+        ? [classId]
+        : section !== undefined
+          ? [section]
+          : []),
     );
     let rank = 0;
     return rows.map((r, i) => {

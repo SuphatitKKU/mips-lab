@@ -1,0 +1,13 @@
+{
+  "auth": {
+    "providers": {
+      "googleSignIn": {
+        "oAuthBrandDisplayName": "MIPS Lab",
+        "supportEmail": "suphatit@gmail.com",
+        "authorizedRedirectUris": [
+          "https://muton-2802c.firebaseapp.com/__/auth/handler"
+        ]
+      }
+    }
+  }
+}

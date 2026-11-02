@@ -4,12 +4,14 @@
 
 ระบบปัจจุบัน: **React + TypeScript + Vite → Cloudflare Pages Functions → D1**
 
-เว็บ: https://mips-lab-kku.pages.dev · Google OAuth ยังไม่เปิด ใช้รหัสนักศึกษา/ชื่อผู้ใช้และรหัสผ่านที่อาจารย์สร้างให้
+เว็บ: https://mips-lab-kku.pages.dev · เพิ่ม Google Login ผ่าน Firebase Auth แล้ว ข้อมูลและ session ยังอยู่ใน D1 เดิม นักศึกษาสมัครสมาชิกเองหรือเชื่อม Google กับบัญชีเดิมได้ อาจารย์ใช้รหัสผ่านเท่านั้น
 
 - อาจารย์สร้าง/แก้โจทย์ C, MIPS, Z80 พร้อมเฉลย public/hidden cases คะแนน กลุ่มเรียน และวันส่ง
 - จัดการบัญชีนักศึกษา กลุ่ม ชั้นปี รหัสผ่าน การเปิด/ปิดบัญชี และดูคะแนน/ประวัติส่งรายคน
 - ชั้นปีคำนวณจากเลข 2 หลักแรกของรหัสและปีการศึกษาที่อาจารย์ตั้ง พร้อม override รายคน
 - ตรวจคำตอบและให้คะแนนฝั่ง server; draft/attempt/solve เก็บใน D1 จริง
+- ห้องเรียนแยกภาคเรียน รหัสเข้าห้อง รายชื่อรอ งานมอบหมาย และโปรเจกต์ Z80 ที่ตรวจคะแนน/ให้ความเห็นได้
+- ตารางรายชื่อและผลคะแนนค้นหา เรียงลำดับ แบ่งหน้า เลือกคอลัมน์ ส่งออก CSV/Word/PDF ได้
 - ไม่ต้องมีฐานข้อมูลหรือ Google keys เดิม และไม่เปิด dev-login ใน production
 
 ## เริ่มบนเครื่อง
@@ -36,7 +38,7 @@ npm run deploy
 
 ฟีเจอร์ใหม่: `switch`, `sizeof`, `&ตัวแปร` และอาร์เรย์ 2 มิติ พร้อม [ตัวอย่างและขอบเขตภาษา](docs/c-education-features.md)
 
-อ่าน [คู่มือ deploy/ใช้งาน](docs/cloudflare-deployment.md) และ [ผลตรวจ compiler/ระบบเดิม](docs/compiler-and-system-audit.md)
+อ่าน [คู่มือ Firebase Google Login](docs/firebase-google-login.md), [คู่มือ classroom และ data tables](docs/classroom-integration.md), [คู่มือ deploy/ใช้งาน](docs/cloudflare-deployment.md) และ [ผลตรวจ compiler/ระบบเดิม](docs/compiler-and-system-audit.md)
 
 ## ที่มาของโจทย์
 
