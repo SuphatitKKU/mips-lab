@@ -3,6 +3,8 @@
 
 import type { MipsTest, Problem, Z80Test } from '../data/problems';
 import { compileC } from './cc/compile';
+import { argumentArrayTypes, argumentArrayWidths, readArrayValue } from './cc/arguments';
+import { sizeOf, type Param } from './cc/parse';
 import { assemble, type Program } from './mips/assembler';
 import { Cpu, layoutArrays } from './mips/cpu';
 import { opOf, fields, RN } from './mips/isa';
@@ -54,10 +56,12 @@ export function grade(p: Problem, code: string, all: boolean): GradeResult {
   if (p.kind === 'z80') return gradeZ80(p, code, tests as Z80Test[]);
 
   let asmSrc = code;
+  let params: Param[] = [];
   if (p.kind === 'c') {
     const c = compileC(code);
     if (!c.ok) return { errors: c.errors, results: [], passed: 0, total: tests.length };
     if (!c.funcs.some((f) => f.name === p.fn)) return fail(`ไม่พบฟังก์ชัน ${p.fn}`, tests.length);
+    params = c.funcs.find(f => f.name === p.fn)!.params;
     asmSrc = c.asm;
   }
   const a = assemble(asmSrc);
@@ -75,7 +79,7 @@ export function grade(p: Problem, code: string, all: boolean): GradeResult {
     if (errors.length) return { errors, results: [], passed: 0, total: tests.length };
   }
 
-  const results = (tests as MipsTest[]).map((t) => runMips(p, prog, t));
+  const results = (tests as MipsTest[]).map((t) => runMips(p, prog, t, params));
   return { errors: [], results, passed: results.filter((r) => r.ok).length, total: results.length };
 }
 
@@ -83,9 +87,9 @@ function fail(msg: string, total: number): GradeResult {
   return { errors: [{ line: 1, msg }], results: [], passed: 0, total };
 }
 
-function runMips(p: Problem, prog: Program, t: MipsTest): TestResult {
+function runMips(p: Problem, prog: Program, t: MipsTest, params: Param[]): TestResult {
   const arrays = t.args.filter(Array.isArray) as number[][];
-  const { mem, addrs } = layoutArrays(arrays, ARR_BASE);
+  const { mem, addrs } = layoutArrays(arrays, ARR_BASE, argumentArrayWidths(params, t.args));
   const regs: Record<string, number> = {};
   let k = 0;
   t.args.forEach((v, i) => (regs['a' + i] = Array.isArray(v) ? addrs[k++] : v));
@@ -103,7 +107,8 @@ function runMips(p: Problem, prog: Program, t: MipsTest): TestResult {
   const gotParts = Object.keys(t.expect).map((r) => `$${r} = ${cpu.r[RN.indexOf(r as never)]}`);
   let ok = Object.entries(t.expect).every(([r, v]) => cpu.r[RN.indexOf(r as never)] === v);
   if (t.expectArr) {
-    const arr = t.expectArr.map((_, i) => cpu.readWord(addrs[0] + 4 * i));
+    const type = argumentArrayTypes(params, t.args)[0] ?? 'int';
+    const arr = t.expectArr.map((_, i) => readArrayValue(cpu, addrs[0] + sizeOf(type) * i, type));
     gotParts.push(`${p.params[0][1]} = [${arr.join(', ')}]`);
     ok &&= arr.every((v, i) => v === t.expectArr![i]);
   }
@@ -195,10 +200,12 @@ export function runOnce(p: Runnable, code: string, args: (number | number[])[]):
   }
 
   let asmSrc = code;
+  let params: Param[] = [];
   if (p.kind === 'c') {
     const c = compileC(code);
     if (!c.ok) return { ...none, errors: c.errors };
     if (!c.funcs.some((f) => f.name === p.fn)) return { ...none, errors: [{ line: 1, msg: `ไม่พบฟังก์ชัน ${p.fn}` }] };
+    params = c.funcs.find(f => f.name === p.fn)!.params;
     asmSrc = c.asm;
   }
   const a = assemble(asmSrc);
@@ -206,7 +213,7 @@ export function runOnce(p: Runnable, code: string, args: (number | number[])[]):
   if (!a.prog.labels.has(p.fn)) return { ...none, errors: [{ line: 1, msg: `ไม่พบ label "${p.fn}:" — ฟังก์ชันต้องเริ่มที่ label นี้` }] };
 
   const arrays = args.filter(Array.isArray) as number[][];
-  const { mem, addrs } = layoutArrays(arrays, ARR_BASE);
+  const { mem, addrs } = layoutArrays(arrays, ARR_BASE, argumentArrayWidths(params, args));
   const regs: Record<string, number> = {};
   let k = 0;
   args.forEach((v, i) => (regs['a' + i] = Array.isArray(v) ? addrs[k++] : v));
@@ -224,7 +231,8 @@ export function runOnce(p: Runnable, code: string, args: (number | number[])[]):
   args.forEach((v, i) => {
     if (!Array.isArray(v)) return;
     const at = addrs[k++];
-    outputs.push([p.params[i]?.[1] ?? `a${i}`, `[${v.map((_, j) => cpu.readWord(at + 4 * j)).join(', ')}]`]);
+    const type = argumentArrayTypes(params, args)[k - 1] ?? 'int';
+    outputs.push([p.params[i]?.[1] ?? `a${i}`, `[${v.map((_, j) => readArrayValue(cpu, at + sizeOf(type) * j, type)).join(', ')}]`]);
   });
   const ended = halt?.kind === 'return' || halt?.kind === 'exit';
   let msg = ended ? undefined : (halt?.msg ?? 'โปรแกรมไม่จบ');

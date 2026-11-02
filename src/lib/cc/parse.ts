@@ -19,10 +19,69 @@ interface Tok {
   n?: number;
 }
 
-const KW = new Set(['int', 'void', 'char', 'unsigned', 'const', 'if', 'else', 'while', 'for', 'do', 'return', 'break', 'continue']);
+const KW = new Set([
+  'int',
+  'void',
+  'char',
+  'unsigned',
+  'const',
+  'if',
+  'else',
+  'while',
+  'for',
+  'do',
+  'return',
+  'break',
+  'continue',
+  'switch',
+  'case',
+  'default',
+  'sizeof',
+]);
 const OPS = [
-  '<<=', '>>=', '++', '--', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<', '>>', '<=', '>=', '==', '!=', '&&', '||',
-  '+', '-', '*', '/', '%', '=', '<', '>', '!', '&', '|', '^', '~', '?', ':', ';', ',', '(', ')', '{', '}', '[', ']',
+  '<<=',
+  '>>=',
+  '++',
+  '--',
+  '+=',
+  '-=',
+  '*=',
+  '/=',
+  '%=',
+  '&=',
+  '|=',
+  '^=',
+  '<<',
+  '>>',
+  '<=',
+  '>=',
+  '==',
+  '!=',
+  '&&',
+  '||',
+  '+',
+  '-',
+  '*',
+  '/',
+  '%',
+  '=',
+  '<',
+  '>',
+  '!',
+  '&',
+  '|',
+  '^',
+  '~',
+  '?',
+  ':',
+  ';',
+  ',',
+  '(',
+  ')',
+  '{',
+  '}',
+  '[',
+  ']',
 ];
 
 function lex(src: string): Tok[] {
@@ -46,15 +105,14 @@ function lex(src: string): Tok[] {
     }
     if (src.startsWith('/*', i)) {
       const e = src.indexOf('*/', i + 2);
-      const end = e < 0 ? src.length : e + 2;
+      if (e < 0) throw new CError(line, 'ขาด */ ปิด comment');
+      const end = e + 2;
       for (let k = i; k < end; k++) if (src[k] === '\n') line++;
       i = end;
       continue;
     }
     if (c === '#') {
-      // preprocessor lines (#include …) are ignored
-      while (i < src.length && src[i] !== '\n') i++;
-      continue;
+      throw new CError(line, 'ยังไม่รองรับ preprocessor เช่น #include, #define หรือ #if — ใช้ฟังก์ชัน C ในชุดภาษาที่รองรับโดยตรง');
     }
     const num = /^(0x[0-9a-fA-F]+|\d+)/.exec(src.slice(i, i + 20));
     if (num) {
@@ -65,17 +123,20 @@ function lex(src: string): Tok[] {
     const ch = /^'(\\?.)'/.exec(src.slice(i, i + 4));
     if (ch) {
       const s = ch[1];
-      const v = s.length === 2 ? ({ n: 10, t: 9, '0': 0, '\\': 92, "'": 39 } as Record<string, number>)[s[1]] ?? s.charCodeAt(1) : s.charCodeAt(0);
+      const v = s.length === 2 ? (({ n: 10, t: 9, '0': 0, '\\': 92, "'": 39 } as Record<string, number>)[s[1]] ?? s.charCodeAt(1)) : s.charCodeAt(0);
       out.push({ k: 'num', v: ch[0], n: v, line });
       i += ch[0].length;
       continue;
     }
     const id = /^[A-Za-z_]\w*/.exec(src.slice(i, i + 64));
     if (id) {
+      if (['struct', 'union', 'enum', 'float', 'double', 'long', 'short', 'typedef', 'static', 'goto'].includes(id[0]))
+        throw new CError(line, `ยังไม่รองรับ ${id[0]} ใน compiler สำหรับบทเรียนนี้`);
       out.push({ k: KW.has(id[0]) ? 'kw' : 'id', v: id[0], line });
       i += id[0].length;
       continue;
     }
+    if (c === '"') throw new CError(line, 'ยังไม่รองรับ string literal และ standard I/O เช่น printf');
     const op = OPS.find((o) => src.startsWith(o, i));
     if (!op) throw new CError(line, `ไม่รู้จักตัวอักษร "${c}"`);
     out.push({ k: 'op', v: op, line });
@@ -90,19 +151,161 @@ function lex(src: string): Tok[] {
 /**
  * Scalars live in one 32-bit register; `char` values are kept sign-extended
  * (`uchar` zero-extended) and cut to 8 bits whenever they are stored. Pointers
- * remember what they point to; every element still takes one 4-byte word.
+ * remember their pointee and array shape; char occupies 1 byte, int and pointers 4.
  */
-export type Type = 'int' | 'uint' | 'char' | 'uchar' | 'void' | 'ptr' | 'uptr' | 'cptr' | 'ucptr';
-
-const PTR: Record<string, Type> = { int: 'ptr', uint: 'uptr', char: 'cptr', uchar: 'ucptr' };
-const ELEM: Record<string, Type> = { ptr: 'int', uptr: 'uint', cptr: 'char', ucptr: 'uchar' };
-export const isPtr = (t: Type) => t in ELEM;
-/** pointer to `t`; pointers to pointers (and void *) are treated as int * */
-export const ptrTo = (t: Type): Type => PTR[t] ?? 'ptr';
-export const elemOf = (t: Type): Type => ELEM[t] ?? 'int';
-/** C's integer promotion: char and unsigned char take part in arithmetic as int */
-export const promote = (t: Type): Type => (t === 'char' || t === 'uchar' ? 'int' : t);
+export type Scalar = 'int' | 'uint' | 'char' | 'uchar' | 'void' | 'ptr' | 'uptr' | 'cptr' | 'ucptr';
+export type Type = Scalar | { k: 'pointer'; to: Type } | { k: 'array'; elem: Type; size: number };
+const PTR: Partial<Record<Scalar, Scalar>> = {
+  int: 'ptr',
+  uint: 'uptr',
+  char: 'cptr',
+  uchar: 'ucptr',
+};
+const ELEM: Partial<Record<Scalar, Type>> = {
+  ptr: 'int',
+  uptr: 'uint',
+  cptr: 'char',
+  ucptr: 'uchar',
+};
+export const isArray = (t: Type): t is Extract<Type, { k: 'array' }> => typeof t === 'object' && t.k === 'array';
+export const isPtr = (t: Type) => typeof t === 'object' || t in ELEM;
+export const ptrTo = (t: Type): Type => (typeof t === 'string' && PTR[t] ? PTR[t]! : { k: 'pointer', to: t });
+export const elemOf = (t: Type): Type => (typeof t === 'object' ? (t.k === 'array' ? t.elem : t.to) : (ELEM[t] ?? 'int'));
+export const decay = (t: Type): Type => (isArray(t) ? ptrTo(t.elem) : t);
+export const promote = (t: Type): Type => (t === 'char' || t === 'uchar' ? 'int' : decay(t));
 export const isUnsigned = (t: Type) => promote(t) === 'uint';
+export function sizeOf(t: Type, line = 1): number {
+  if (t === 'void') throw new CError(line, 'ใช้ sizeof หรือคำนวณขนาดของ void ไม่ได้');
+  return isArray(t) ? t.size * sizeOf(t.elem, line) : t === 'char' || t === 'uchar' ? 1 : 4;
+}
+export function typeText(t: Type): string {
+  if (isArray(t)) {
+    const dims: number[] = [];
+    let elem: Type = t;
+    while (isArray(elem)) {
+      dims.push(elem.size);
+      elem = elem.elem;
+    }
+    return typeText(elem) + dims.map((size) => `[${size}]`).join('');
+  }
+  if (typeof t === 'object') return `${typeText(t.to)} *`;
+  return {
+    int: 'int',
+    uint: 'unsigned int',
+    char: 'char',
+    uchar: 'unsigned char',
+    void: 'void',
+    ptr: 'int *',
+    uptr: 'unsigned int *',
+    cptr: 'char *',
+    ucptr: 'unsigned char *',
+  }[t];
+}
+export function objectType(d: VarDecl): Type {
+  return (d.dims ?? (d.size == null ? [] : [d.size])).reduceRight<Type>((elem, size) => ({ k: 'array', elem, size }), d.type);
+}
+/** Integer constant expressions used for dimensions, case labels and static initializers. */
+export function constantInt(e: Expr, sizeofExpr?: (e: Expr) => number): number | null {
+  type Constant = { n: number; u: boolean };
+  const unsigned = (x: Expr): boolean => {
+    switch (x.k) {
+      case 'num':
+        return x.v > 2147483647;
+      case 'sizeof':
+        return true;
+      case 'cast':
+        return x.to === 'uint';
+      case 'un':
+        return x.op !== '!' && unsigned(x.e);
+      case 'cond':
+        return unsigned(x.a) || unsigned(x.b);
+      case 'bin':
+        return ['<', '<=', '>', '>=', '==', '!=', '&&', '||'].includes(x.op)
+          ? false
+          : x.op === '<<' || x.op === '>>'
+            ? unsigned(x.l)
+            : unsigned(x.l) || unsigned(x.r);
+      default:
+        return false;
+    }
+  };
+  const result = (n: number, u = false): Constant => ({
+    n: u ? n >>> 0 : n | 0,
+    u,
+  });
+  const evaluate = (x: Expr): Constant | null => {
+    if (x.k === 'num') return result(x.v, unsigned(x));
+    if (x.k === 'sizeof') {
+      const n = x.type ? sizeOf(x.type, x.line) : sizeofExpr ? sizeofExpr(x.e!) : null;
+      return n === null ? null : result(n, true);
+    }
+    if (x.k === 'cast') {
+      const v = evaluate(x.e);
+      return !v ? null : result(x.to === 'char' ? (v.n << 24) >> 24 : x.to === 'uchar' ? v.n & 255 : v.n, x.to === 'uint');
+    }
+    if (x.k === 'un' && ['-', '~', '!'].includes(x.op)) {
+      const v = evaluate(x.e);
+      if (!v) return null;
+      return result(x.op === '-' ? -v.n : x.op === '~' ? ~v.n : +!v.n, x.op === '!' ? false : v.u);
+    }
+    if (x.k === 'cond') {
+      const c = evaluate(x.c);
+      if (!c) return null;
+      const v = evaluate(c.n ? x.a : x.b);
+      return v ? result(v.n, unsigned(x)) : null;
+    }
+    if (x.k !== 'bin') return null;
+    const l = evaluate(x.l);
+    if (!l) return null;
+    if (x.op === '&&' && !l.n) return result(0);
+    if (x.op === '||' && l.n) return result(1);
+    const r = evaluate(x.r);
+    if (!r) return null;
+    const u = l.u || r.u,
+      a = u ? l.n >>> 0 : l.n,
+      b = u ? r.n >>> 0 : r.n;
+    switch (x.op) {
+      case '+':
+        return result(a + b, u);
+      case '-':
+        return result(a - b, u);
+      case '*':
+        return result(Math.imul(a, b), u);
+      case '/':
+      case '%':
+        if (!b) throw new CError(x.line, 'หารด้วยศูนย์ในนิพจน์ค่าคงที่');
+        return result(x.op === '/' ? Math.trunc(a / b) : a % b, u);
+      case '<<':
+        return result(l.n << (r.n & 31), l.u);
+      case '>>':
+        return result(l.u ? l.n >>> (r.n & 31) : l.n >> (r.n & 31), l.u);
+      case '&':
+        return result(a & b, u);
+      case '|':
+        return result(a | b, u);
+      case '^':
+        return result(a ^ b, u);
+      case '<':
+        return result(+(a < b));
+      case '<=':
+        return result(+(a <= b));
+      case '>':
+        return result(+(a > b));
+      case '>=':
+        return result(+(a >= b));
+      case '==':
+        return result(+(a === b));
+      case '!=':
+        return result(+(a !== b));
+      case '&&':
+        return result(+!!(a && b));
+      case '||':
+        return result(+!!(a || b));
+    }
+    return null;
+  };
+  return evaluate(e)?.n ?? null;
+}
 
 export type Expr = { line: number } & (
   | { k: 'num'; v: number }
@@ -115,6 +318,7 @@ export type Expr = { line: number } & (
   | { k: 'call'; name: string; args: Expr[] }
   | { k: 'cond'; c: Expr; a: Expr; b: Expr }
   | { k: 'cast'; to: Type; e: Expr }
+  | { k: 'sizeof'; type?: Type; e?: Expr }
 );
 
 export interface VarDecl {
@@ -122,6 +326,7 @@ export interface VarDecl {
   type: Type;
   /** element count for arrays */
   size?: number;
+  dims?: number[];
   init?: Expr;
   initList?: Expr[];
   line: number;
@@ -137,6 +342,12 @@ export type Stmt = { line: number } & (
   | { k: 'return'; e?: Expr }
   | { k: 'break' }
   | { k: 'continue' }
+  | {
+      k: 'switch';
+      c: Expr;
+      cases: { value?: Expr; body: Stmt[]; line: number }[];
+      end: number;
+    }
   | { k: 'block'; body: Stmt[]; end: number }
 );
 
@@ -205,27 +416,61 @@ export function parse(src: string): Unit {
       const name = ident();
       if (type === 'void') throw new CError(ln, `ตัวแปร ${name} เป็น void ไม่ได้`);
       const d: VarDecl = { name, type, line: ln };
-      if (eat('[')) {
-        if (is(']')) d.size = -1;
-        else {
-          const n = t[p];
-          if (n.k !== 'num') throw new CError(n.line, 'ขนาดอาร์เรย์ต้องเป็นตัวเลขคงที่');
-          d.size = n.n!;
-          p++;
+      const dims: number[] = [];
+      while (eat('[')) {
+        if (dims.length >= 2) throw new CError(ln, 'รองรับอาร์เรย์ได้ไม่เกิน 2 มิติ');
+        if (is(']')) {
+          if (dims.length) throw new CError(ln, 'ต้องระบุจำนวนคอลัมน์ของอาร์เรย์ 2 มิติ');
+          dims.push(-1);
+        } else {
+          const value = constantInt(assign());
+          if (value === null || !Number.isInteger(value) || value <= 0 || value > 4096)
+            throw new CError(ln, 'ขนาดอาร์เรย์ต้องเป็นจำนวนเต็มคงที่ 1–4096 (ยังไม่รองรับ VLA)');
+          dims.push(value);
         }
         expect(']');
       }
+      if (dims.length) {
+        d.dims = dims;
+        d.size = dims.reduce((a, b) => a * b, 1);
+      }
       if (eat('=')) {
-        if (d.size != null) {
+        if (dims.length) {
           expect('{', 'สำหรับค่าเริ่มต้นของอาร์เรย์');
-          d.initList = [];
-          if (!is('}'))
-            do d.initList.push(assign());
-            while (eat(',') && !is('}'));
+          const values: Expr[] = [];
+          const rowSize = dims[1] ?? 1;
+          while (!is('}')) {
+            if (eat('{')) {
+              if (dims.length !== 2) throw new CError(ln, 'initializer ซ้อนใช้กับอาร์เรย์ 2 มิติเท่านั้น');
+              if (values.length % rowSize) throw new CError(ln, 'จัด initializer ให้เริ่มที่ต้นแถว');
+              const row: Expr[] = [];
+              if (!is('}'))
+                do {
+                  row.push(assign());
+                } while (eat(',') && !is('}'));
+              expect('}');
+              if (row.length > rowSize) throw new CError(ln, 'ค่าเริ่มต้นเกินจำนวนคอลัมน์');
+              values.push(
+                ...row,
+                ...Array.from({ length: rowSize - row.length }, () => ({
+                  k: 'num' as const,
+                  v: 0,
+                  line: ln,
+                })),
+              );
+            } else values.push(assign());
+            if (!eat(',')) break;
+          }
           expect('}');
-          if (d.size === -1) d.size = d.initList.length;
+          if (dims[0] === -1) {
+            dims[0] = Math.ceil(values.length / rowSize);
+            d.size = dims.reduce((a, b) => a * b, 1);
+          }
+          d.initList = values;
         } else d.init = assign();
       }
+      if (dims.length && (dims[0] === -1 || !d.size || d.size > 4096)) throw new CError(ln, `ต้องระบุขนาดอาร์เรย์ ${name} และจำนวนสมาชิกต้องไม่เกิน 4096`);
+      if (d.initList && d.initList.length > d.size!) throw new CError(ln, `ค่าเริ่มต้นเกินขนาดอาร์เรย์ ${name}`);
       if (d.size === -1) throw new CError(ln, `ต้องระบุขนาดอาร์เรย์ ${name}`);
       vars.push(d);
     } while (eat(','));
@@ -243,8 +488,7 @@ export function parse(src: string): Unit {
     const op = t[p];
     if (op.k === 'op' && ['=', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<=', '>>='].includes(op.v)) {
       p++;
-      if (!['var', 'index'].includes(l.k) && !(l.k === 'un' && l.op === '*'))
-        throw new CError(op.line, 'ด้านซ้ายของ = ต้องเป็นตัวแปร, a[i] หรือ *p');
+      if (!['var', 'index'].includes(l.k) && !(l.k === 'un' && l.op === '*')) throw new CError(op.line, 'ด้านซ้ายของ = ต้องเป็นตัวแปร, a[i] หรือ *p');
       return { k: 'assign', op: op.v, t: l, v: assign(), line: op.line };
     }
     return l;
@@ -271,6 +515,23 @@ export function parse(src: string): Unit {
   }
   function unary(): Expr {
     const tk = t[p];
+    if (eat('sizeof')) {
+      if (is('(') && peek(1).k === 'kw' && ['int', 'unsigned', 'char', 'void', 'const'].includes(peek(1).v)) {
+        p++;
+        let ty = stars(baseType());
+        const dims: number[] = [];
+        while (eat('[')) {
+          const n = constantInt(assign());
+          if (n === null || n <= 0 || n > 4096) throw new CError(tk.line, 'ขนาดอาร์เรย์ใน sizeof ต้องเป็นค่าคงที่ 1–4096');
+          dims.push(n);
+          expect(']');
+        }
+        ty = dims.reduceRight<Type>((elem, size) => ({ k: 'array', elem, size }), ty);
+        expect(')');
+        return { k: 'sizeof', type: ty, line: tk.line };
+      }
+      return { k: 'sizeof', e: unary(), line: tk.line };
+    }
     if (tk.k === 'op') {
       if (tk.v === '++' || tk.v === '--') {
         p++;
@@ -352,6 +613,29 @@ export function parse(src: string): Unit {
       }
       return { k: 'if', c, a, line };
     }
+    if (eat('switch')) {
+      expect('(');
+      const c = expr();
+      expect(')');
+      expect('{');
+      const cases: Extract<Stmt, { k: 'switch' }>['cases'] = [];
+      while (!is('}')) {
+        const at = t[p].line;
+        let value: Expr | undefined;
+        if (eat('case')) value = ternary();
+        else if (eat('default')) {
+          if (cases.some((x) => !x.value)) throw new CError(at, 'switch มี default ซ้ำ');
+        } else throw new CError(at, 'คำสั่งใน switch ต้องเริ่มด้วย case หรือ default');
+        expect(':');
+        const body: Stmt[] = [];
+        while (!is('case') && !is('default') && !is('}')) {
+          if (t[p].k === 'eof') throw new CError(at, 'ขาด } ปิด switch');
+          body.push(stmt());
+        }
+        cases.push({ value, body, line: at });
+      }
+      return { k: 'switch', c, cases, end: expect('}').line, line };
+    }
     if (eat('while')) {
       expect('(');
       const c = expr();
@@ -428,9 +712,18 @@ export function parse(src: string): Unit {
           let ty = stars(baseType());
           const pn = ident();
           if (eat('[')) {
-            if (t[p].k === 'num') p++;
+            if (!is(']')) {
+              const n = constantInt(assign());
+              if (n === null || n <= 0 || n > 4096) throw new CError(line, 'ขนาดพารามิเตอร์อาร์เรย์ต้องเป็นค่าคงที่ (ยังไม่รองรับ VLA)');
+            }
             expect(']');
-            ty = ptrTo(ty);
+            if (eat('[')) {
+              const cols = constantInt(assign());
+              if (cols === null || cols <= 0 || cols > 4096) throw new CError(line, 'ต้องระบุจำนวนคอลัมน์คงที่ 1–4096');
+              expect(']');
+              ty = ptrTo({ k: 'array', elem: ty, size: cols });
+            } else ty = ptrTo(ty);
+            if (is('[')) throw new CError(line, 'รองรับอาร์เรย์ได้ไม่เกิน 2 มิติ');
           }
           params.push({ name: pn, type: ty });
         } while (eat(','));

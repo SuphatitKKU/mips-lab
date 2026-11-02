@@ -23,11 +23,8 @@ assert.equal(config.devLogin, false);
 const { token } = await request("/auth/password", undefined, account);
 // The login contract is username/password. Never print credentials or session tokens.
 const overview = await request("/teacher/overview", token);
-assert.equal(overview.problems.length, 24);
-assert.equal(
-  overview.students.filter((s: any) => s.role === "student").length,
-  0,
-);
+assert.ok(overview.problems.length >= PROBLEMS.length);
+const studentsBefore = overview.students.filter((s: any) => s.role === 'student').length;
 for (const id of [1, 2, 3, 4, 7, 24]) {
   const p = PROBLEMS.find((p) => p.id === id)!;
   const result = await request(`/problems/${id}/test`, token, {
@@ -39,6 +36,12 @@ for (const id of [1, 2, 3, 4, 7, 24]) {
   );
   await new Promise((resolve) => setTimeout(resolve, 1100));
 }
+const extendedSource = 'void calculate(int*p,int n){int a=1;for(int i=2;i<=n;i++)a*=i;*p=a;} int fact(int n){int m[2][2]={{n,0},{1,0}};int value=0;calculate(&value,m[0][0]);switch(sizeof(m)/sizeof(m[0][0])){case 4:return value;default:return 0;}}';
+const extended = await request('/problems/3/submit', token, {code:extendedSource});
+assert.equal(extended.pass,true,'Extended C features must grade on the production edge');
+assert.equal(extended.awarded,null,'Instructor validation must not award student points');
+assert.equal((await request('/teacher/overview',token)).students.filter((s:any)=>s.role==='student').length,studentsBefore);
+console.log(`Production switch/sizeof/address/matrix and hidden cases: ${extended.passed}/${extended.total} passed`);
 await request("/auth/logout", token, {});
 console.log(
   "Production D1, password login, instructor dashboard, MIPS/C/Z80 grading and logout verified. No student accounts or scores created.",

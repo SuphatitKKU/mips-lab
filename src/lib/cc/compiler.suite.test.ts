@@ -687,6 +687,15 @@ const C_TYPES: Case[] = [
   { name: 'char keeps 8 bits (signed)', src: 'int f(int a) { char c = a; return c; }', fn: 'f', ref: (a: number) => (a << 24) >> 24, inputs: [[200], [65], [-1], [300]] },
 ];
 
+CASES.push(
+  { name: 'switch fallthrough and default', src: 'int f(int n){int s=0;switch(n){case 1:s=10;case 2:s+=5;break;default:s=-1;}return s;}', fn: 'f', ref: (n: number) => n === 1 ? 15 : n === 2 ? 5 : -1, inputs: [[0], [1], [2], [3]] },
+  { name: 'address of local updated through callee', src: 'void inc(int*p){*p+=1;}int f(){int x=4;inc(&x);return x;}', fn: 'f', ref: () => 5, inputs: [[]] },
+  { name: 'local matrix passed by row', src: 'int sum(int*a,int n){int s=0;for(int i=0;i<n;i++)s+=a[i];return s;}int f(){int m[2][3]={{1,2,3},{4,5,6}};return sum(m[1],3);}', fn: 'f', ref: () => 15, inputs: [[]] },
+  { name: 'sizeof array and unevaluated increment', src: 'int f(){int m[2][3];int n=7;return sizeof(m)+sizeof(n++)+n;}', fn: 'f', ref: () => 35, inputs: [[]] },
+  { name: 'byte sized char array and pointer', src: 'int f(){unsigned char a[3]={1,200,7};unsigned char*p=a;p++;return *p+sizeof(a);}', fn: 'f', ref: () => 203, inputs: [[]] },
+  { name: 'addressed parameter', src: 'void put(int*p){*p=19;}int f(int n){put(&n);return n;}', fn: 'f', ref: () => 19, inputs: [[0], [27]] },
+);
+
 function argsCopy(args: Arg[]): Arg[] {
   return args.map((a) => (Array.isArray(a) ? [...a] : a));
 }
@@ -951,17 +960,12 @@ describe('E. outside the subset: a clear error, never a crash or a wrong program
     ['struct', 'struct P { int x; }; int f() { struct P p; p.x = 1; return p.x; }'],
     ['float', 'int f() { float x = 1.5; return (int)(x * 2); }'],
     ['string literal / printf', 'int f() { printf("hi"); return 0; }'],
-    ['switch', 'int f(int a) { switch (a) { case 1: return 10; default: return 0; } }'],
     ['goto', 'int f() { int i = 0; L: i++; if (i < 3) goto L; return i; }'],
-    ['2-D array', 'int f() { int m[2][2]; m[1][1] = 3; return m[1][1]; }'],
-    ['sizeof', 'int f() { return sizeof(int); }'],
     ['long / short', 'int f() { long a = 3; return a; }'],
     ['static local', 'int f() { static int c = 0; c++; return c; }'],
-    ['address of a register variable', 'void inc(int *p) { *p = *p + 1; } int f() { int x = 4; inc(&x); return x; }'],
     ['comma operator', 'int f(int n) { int i, j, s = 0; for (i = 0, j = n; i < j; i++, j--) s++; return s; }'],
     ['5 parameters', 'int f(int a, int b, int c, int d, int e) { return e; }'],
     ['9 variables in a function that calls', 'int h(int x) { return x; } int f() { int a = 1, b = 2, c = 3, d = 4, e = 5, g = 6, i = 7, j = 8, k = 9; return h(a + b + c + d + e + g + i + j + k); }'],
-    ['global initialised with an expression', 'int N = 2 * 3; int f() { return N; }'],
     ['undeclared variable', 'int f() { return y; }'],
     ['missing semicolon', 'int f() { return 1 }'],
   ];

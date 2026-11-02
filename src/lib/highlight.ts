@@ -19,7 +19,7 @@ const STYLE: Record<Role, [string, number]> = {
 };
 
 const C_RE =
-  /(\/\/.*$|\/\*.*?\*\/)|(\b(?:int|void|char|unsigned|const|for|while|do|if|else|return|break|continue)\b)|(\b(?:0x[0-9a-fA-F]+|\d+)\b|'\\?.')/g;
+  /(\/\/.*$|\/\*.*?\*\/)|(\b(?:int|void|char|unsigned|const|for|while|do|if|else|return|break|continue|switch|case|default|sizeof)\b)|(\b(?:0x[0-9a-fA-F]+|\d+)\b|'\\?.')/g;
 const MIPS_RE = /(#.*$)|(^\s*[A-Za-z_.][\w.]*:)|(\.[a-z]+\b)|(\$\w+)|(-?\b(?:0x[0-9a-fA-F]+|\d+)\b)/g;
 const Z80_RE = /(;.*$)|(^\s*[A-Za-z_]\w*:)|(\b[0-9][0-9A-Fa-f]*[hH]\b|\b\d+\b)/g;
 

@@ -3,7 +3,28 @@
 // non-leaf functions move them to saved $s registers and build a stack frame.
 // Every instruction remembers the C line it came from and a Thai explanation.
 
-import { CError, elemOf, isPtr, isUnsigned, parse, promote, ptrTo, type Expr, type Func, type Param, type Stmt, type Type, type Unit, type VarDecl } from './parse';
+import {
+  CError,
+  constantInt,
+  decay,
+  isArray,
+  objectType,
+  sizeOf,
+  typeText,
+  elemOf,
+  isPtr,
+  isUnsigned,
+  parse,
+  promote,
+  ptrTo,
+  type Expr,
+  type Func,
+  type Param,
+  type Stmt,
+  type Type,
+  type Unit,
+  type VarDecl,
+} from './parse';
 
 export interface OutLine {
   lbl?: string;
@@ -19,14 +40,13 @@ export interface CompiledFunc {
   ret: Type;
 }
 
-export type CompileResult =
-  | { ok: true; lines: OutLine[]; asm: string; funcs: CompiledFunc[] }
-  | { ok: false; errors: { line: number; msg: string }[] };
+export type CompileResult = { ok: true; lines: OutLine[]; asm: string; funcs: CompiledFunc[] } | { ok: false; errors: { line: number; msg: string }[] };
 
 type Store =
   | { k: 'reg'; r: string; type: Type }
-  | { k: 'arr'; off: number; size: number; elem: Type }
-  | { k: 'garr'; label: string; elem: Type }
+  | { k: 'stack'; off: number; type: Type }
+  | { k: 'arr'; off: number; size: number; elem: Type; shape: Type }
+  | { k: 'garr'; label: string; elem: Type; shape: Type }
   | { k: 'gvar'; label: string; type: Type };
 
 interface Val {
@@ -43,6 +63,7 @@ const isPow2 = (v: number) => v > 0 && (v & (v - 1)) === 0;
 
 function hasCall(n: unknown): boolean {
   if (!n || typeof n !== 'object') return false;
+  if ((n as { k?: string }).k === 'sizeof') return false;
   if ((n as { k?: string }).k === 'call') return true;
   return Object.values(n as object).some((v) => (Array.isArray(v) ? v.some(hasCall) : hasCall(v)));
 }
@@ -64,10 +85,102 @@ function collectDecls(s: Stmt | undefined, out: VarDecl[]) {
     case 'do':
       collectDecls(s.body, out);
       break;
+    case 'switch':
+      s.cases.forEach((c) => c.body.forEach((x) => collectDecls(x, out)));
+      break;
     case 'for':
       collectDecls(s.init, out);
       collectDecls(s.body, out);
       break;
+  }
+}
+
+function addressNames(n: unknown, names = new Set<string>()): Set<string> {
+  if (!n || typeof n !== 'object') return names;
+  const x = n as Expr;
+  if (x.k === 'sizeof') return names;
+  if (x.k === 'un' && x.op === '&' && x.e.k === 'var') names.add(x.e.name);
+  for (const value of Object.values(n))
+    if (Array.isArray(value)) value.forEach((v) => addressNames(v, names));
+    else addressNames(value, names);
+  return names;
+}
+const loadOp = (t: Type) => (t === 'char' ? 'lb' : t === 'uchar' ? 'lbu' : 'lw');
+const storeOp = (t: Type) => (t === 'char' || t === 'uchar' ? 'sb' : 'sw');
+const align4 = (n: number) => (n + 3) & ~3;
+function expressionType(e: Expr, lookup: (name: string, line: number) => Store, unit: Unit): Type {
+  const resolve = (x: Expr) => expressionType(x, lookup, unit);
+  switch (e.k) {
+    case 'num':
+      return e.v > 0x7fffffff ? 'uint' : 'int';
+    case 'var': {
+      const s = lookup(e.name, e.line);
+      return s.k === 'reg' || s.k === 'stack' || s.k === 'gvar' ? s.type : s.shape;
+    }
+    case 'bin': {
+      const lt = decay(resolve(e.l));
+      const rt = decay(resolve(e.r));
+      if (lt === 'void' || rt === 'void') throw new CError(e.line, 'ใช้ค่า void ในนิพจน์ไม่ได้');
+      if (['<', '<=', '>', '>=', '==', '!=', '&&', '||'].includes(e.op)) return 'int';
+      if ((e.op === '+' || e.op === '-') && isPtr(lt) && !isPtr(rt)) return lt;
+      if (e.op === '+' && !isPtr(lt) && isPtr(rt)) return rt;
+      if (e.op === '-' && isPtr(lt) && isPtr(rt)) return 'int';
+      if (e.op === '<<' || e.op === '>>') return promote(lt);
+      return isUnsigned(lt) || isUnsigned(rt) ? 'uint' : 'int';
+    }
+    case 'un':
+      if (e.op === '&') {
+        if (!['var', 'index'].includes(e.e.k) && !(e.e.k === 'un' && e.e.op === '*')) throw new CError(e.line, 'ใช้ & ได้เฉพาะตัวแปรหรือสมาชิกอาร์เรย์');
+        return ptrTo(resolve(e.e));
+      }
+      if (e.op === '*') {
+        const t = resolve(e.e);
+        if (!isPtr(t) || elemOf(t) === 'void') throw new CError(e.line, 'dereference ต้องใช้ pointer ที่มีชนิดข้อมูล');
+        return elemOf(t);
+      }
+      if (e.op === '!') {
+        if (resolve(e.e) === 'void') throw new CError(e.line, 'ใช้ ! กับ void ไม่ได้');
+        return 'int';
+      }
+      return promote(resolve(e.e));
+    case 'index': {
+      const t = resolve(e.a);
+      if (!isPtr(t) || elemOf(t) === 'void') throw new CError(e.line, 'ใช้ index ได้เฉพาะอาร์เรย์หรือ pointer ที่มีชนิดข้อมูล');
+      return elemOf(t);
+    }
+    case 'assign':
+    case 'inc': {
+      if (!['var', 'index'].includes(e.t.k) && !(e.t.k === 'un' && e.t.op === '*'))
+        throw new CError(e.line, 'ต้องใช้ตัวแปร สมาชิกอาร์เรย์ หรือ *pointer ทางด้านซ้าย');
+      const t = resolve(e.t);
+      if (isArray(t)) throw new CError(e.line, 'แก้ค่าอาร์เรย์ทั้งก้อนไม่ได้');
+      return t;
+    }
+    case 'cond': {
+      if (resolve(e.c) === 'void') throw new CError(e.line, 'เงื่อนไขต้องมีค่า');
+      const a = decay(resolve(e.a)),
+        b = decay(resolve(e.b));
+      if (a === 'void' || b === 'void') {
+        if (a === b) return 'void';
+        throw new CError(e.line, 'แขนง ternary ต้องมีชนิดที่เข้ากันได้');
+      }
+      if (isPtr(a)) return a;
+      if (isPtr(b)) return b;
+      return isUnsigned(a) || isUnsigned(b) ? 'uint' : 'int';
+    }
+    case 'cast':
+      resolve(e.e);
+      return e.to;
+    case 'sizeof':
+      sizeOf(e.type ?? resolve(e.e!), e.line);
+      return 'uint';
+    case 'call': {
+      const f = unit.funcs.find((f) => f.name === e.name);
+      if (!f) throw new CError(e.line, `ไม่พบฟังก์ชัน ${e.name}`);
+      if (e.args.length !== f.params.length) throw new CError(e.line, `จำนวนอาร์กิวเมนต์ของ ${e.name} ไม่ตรงกับพารามิเตอร์`);
+      e.args.forEach((x) => resolve(x));
+      return f.ret;
+    }
   }
 }
 
@@ -93,13 +206,19 @@ class FnGen {
   private names = new Map<string, string>();
   private temps: string[];
   private busy = new Set<string>();
-  private loops: { brk: string; cont: string; usedBrk: boolean; usedCont: boolean }[] = [];
+  private loops: {
+    brk: string;
+    cont: string | null;
+    usedBrk: boolean;
+    usedCont: boolean;
+  }[] = [];
   private frame = 0;
   private saved: [string, number][] = [];
   private ret = '';
   private retUsed = false;
   private localRegs: string[] = [];
   private arrOff = 0;
+  private stackDecl = new Set<VarDecl>();
   private declReg = new Map<VarDecl, string>();
 
   constructor(
@@ -111,7 +230,9 @@ class FnGen {
     const leaf = !hasCall(fn.body);
     const decls: VarDecl[] = [];
     collectDecls(fn.body, decls);
-    const scalars = decls.filter((d) => d.size == null);
+    const addressed = addressNames(fn.body);
+    const scalars = decls.filter((d) => d.size == null && !addressed.has(d.name));
+    decls.filter((d) => d.size == null && addressed.has(d.name)).forEach((d) => this.stackDecl.add(d));
     const arrays = decls.filter((d) => d.size != null);
 
     if (leaf) {
@@ -123,8 +244,7 @@ class FnGen {
       this.localRegs = scalars.slice(nT).map((_, i) => S_REGS[i]);
     } else {
       const need = fn.params.length + scalars.length;
-      if (need > S_REGS.length)
-        throw new CError(fn.line, `ฟังก์ชัน ${fn.name} มีพารามิเตอร์และตัวแปรรวม ${need} ตัว เกินจำนวน $s ที่มี (8)`);
+      if (need > S_REGS.length) throw new CError(fn.line, `ฟังก์ชัน ${fn.name} มีพารามิเตอร์และตัวแปรรวม ${need} ตัว เกินจำนวน $s ที่มี (8)`);
       scalars.forEach((d, i) => this.declReg.set(d, S_REGS[fn.params.length + i]));
       this.temps = [...T_REGS];
       this.localRegs = S_REGS.slice(0, need);
@@ -133,8 +253,18 @@ class FnGen {
     // frame: [local arrays][saved $s][$ra]
     for (const a of arrays) {
       this.declReg.set(a, String(this.arrOff));
-      this.arrOff += 4 * a.size!;
+      this.arrOff += align4(sizeOf(objectType(a), a.line));
     }
+    for (const d of this.stackDecl) {
+      this.declReg.set(d, String(this.arrOff));
+      this.arrOff += 4;
+    }
+    const paramOffsets = new Map<string, number>();
+    for (const p of fn.params)
+      if (addressed.has(p.name)) {
+        paramOffsets.set(p.name, this.arrOff);
+        this.arrOff += 4;
+      }
     let off = this.arrOff;
     for (const r of this.localRegs) {
       this.saved.push([r, off]);
@@ -144,12 +274,13 @@ class FnGen {
       this.saved.push(['$ra', off]);
       off += 4;
     }
-    this.frame = off;
+    this.frame = align4(off);
+    if (this.frame > 32760) throw new CError(fn.line, 'พื้นที่ stack ของฟังก์ชันเกิน 32760 byte — ลดขนาดอาร์เรย์');
 
     const sc = new Map<string, Store>();
     fn.params.forEach((p, i) => {
       const r = leaf ? A_REGS[i] : S_REGS[i];
-      sc.set(p.name, { k: 'reg', r, type: p.type });
+      sc.set(p.name, paramOffsets.has(p.name) ? { k: 'stack', off: paramOffsets.get(p.name)!, type: p.type } : { k: 'reg', r, type: p.type });
       if (leaf) this.names.set(r, p.name);
     });
     this.scopes.push(sc);
@@ -221,10 +352,15 @@ class FnGen {
       for (const [r, off] of [...this.saved].reverse()) this.emit(`sw   ${r}, ${off}($sp)`, fn.line, `เก็บค่าเดิมของ ${r} ไว้ก่อนใช้งาน`);
     }
     fn.params.forEach((p, i) => {
-      const r = (this.scopes[0].get(p.name) as { r: string }).r;
+      const store = this.scopes[0].get(p.name)!;
+      if (store.k === 'stack') {
+        this.narrow(A_REGS[i], p.type, fn.line);
+        this.emit(`${storeOp(p.type)} ${A_REGS[i]}, ${store.off}($sp)`, fn.line, `เก็บพารามิเตอร์ ${p.name} ในหน่วยความจำเพื่อใช้ &${p.name}`);
+        return;
+      }
+      const r = (store as { r: string }).r;
       this.names.set(r, p.name);
-      if (r !== A_REGS[i])
-        this.emit(`move ${r}, ${A_REGS[i]}`, fn.line, `ย้ายพารามิเตอร์ ${p.name} ไปไว้ใน register ที่ไม่ถูกเขียนทับเมื่อเรียกฟังก์ชันอื่น`);
+      if (r !== A_REGS[i]) this.emit(`move ${r}, ${A_REGS[i]}`, fn.line, `ย้ายพารามิเตอร์ ${p.name} ไปไว้ใน register ที่ไม่ถูกเขียนทับเมื่อเรียกฟังก์ชันอื่น`);
       this.narrow(r, p.type, fn.line);
     });
 
@@ -323,13 +459,51 @@ class FnGen {
         this.scopes.pop();
         return;
       }
+      case 'switch': {
+        if (isPtr(this.typeOf(s.c)) || this.typeOf(s.c) === 'void') throw new CError(s.line, 'switch ต้องใช้ expression จำนวนเต็ม');
+        const done = this.labels.make('switch_end');
+        const targets = s.cases.map((c) => ({
+          ...c,
+          label: this.labels.make(c.value ? 'case' : 'default'),
+        }));
+        const v = this.expr(s.c),
+          seen = new Set<number>();
+        for (const c of targets)
+          if (c.value) {
+            const n = this.constOf(c.value);
+            if (isPtr(this.typeOf(c.value)) || n === null) throw new CError(c.line, 'case ต้องเป็นนิพจน์จำนวนเต็มคงที่');
+            const key = n | 0;
+            if (seen.has(key)) throw new CError(c.line, `case ${key} ซ้ำ`);
+            seen.add(key);
+            const test = this.expr({ k: 'num', v: key, line: c.line });
+            this.emit(`beq ${v.r}, ${test.r}, ${c.label}`, c.line, `เลือก case ${key}`);
+            this.free(test);
+          }
+        this.free(v);
+        this.emit(`j ${targets.find((c) => !c.value)?.label ?? done}`, s.line, 'ไม่ตรง case: ไป default หรือออกจาก switch');
+        this.loops.push({
+          brk: done,
+          cont: null,
+          usedBrk: false,
+          usedCont: false,
+        });
+        this.scopes.push(new Map());
+        for (const c of targets) {
+          this.label(c.label, c.line);
+          c.body.forEach((x) => this.stmt(x));
+        }
+        this.scopes.pop();
+        this.loops.pop();
+        this.label(done, s.end);
+        return;
+      }
       case 'break':
       case 'continue': {
-        const L = this.loops.at(-1);
-        if (!L) throw new CError(s.line, `ใช้ ${s.k} ได้เฉพาะในลูป`);
+        const L = s.k === 'break' ? this.loops.at(-1) : [...this.loops].reverse().find((x) => x.cont !== null);
+        if (!L) throw new CError(s.line, `ใช้ ${s.k} ได้เฉพาะใน${s.k === 'break' ? 'ลูปหรือ switch' : 'ลูป'}`);
         if (s.k === 'break') L.usedBrk = true;
         else L.usedCont = true;
-        this.emit(`j    ${s.k === 'break' ? L.brk : L.cont}`, s.line, s.k === 'break' ? 'ออกจากลูป' : 'ข้ามไปรอบถัดไป');
+        this.emit(`j    ${s.k === 'break' ? L.brk : L.cont}`, s.line, s.k === 'break' ? 'ออกจากลูปหรือ switch ที่ครอบอยู่' : 'ข้ามไปรอบถัดไป');
         return;
       }
     }
@@ -349,14 +523,29 @@ class FnGen {
     const loc = this.declReg.get(d)!;
     if (d.size != null) {
       const off = +loc;
-      scope.set(d.name, { k: 'arr', off, size: d.size, elem: d.type });
+      scope.set(d.name, {
+        k: 'arr',
+        off,
+        size: d.size,
+        elem: d.type,
+        shape: objectType(d),
+      });
       if (d.initList) {
         if (d.initList.length > d.size) throw new CError(d.line, `ค่าเริ่มต้นเกินขนาดอาร์เรย์ ${d.name}[${d.size}]`);
-        d.initList.forEach((e, i) => {
+        Array.from({ length: d.size }, (_, i) => d.initList![i] ?? { k: 'num' as const, v: 0, line: d.line }).forEach((e, i) => {
           const v = this.narrowed(this.expr(e), d.type, d.line);
-          this.emit(`sw   ${v.r}, ${off + 4 * i}($sp)`, d.line, `${d.name}[${i}] = ${exprText(e)}`);
+          this.emit(`${storeOp(d.type)} ${v.r}, ${off + sizeOf(d.type, d.line) * i}($sp)`, d.line, `${d.name}[${i}] = ${exprText(e)}`);
           this.free(v);
         });
+      }
+      return;
+    }
+    if (this.stackDecl.has(d)) {
+      scope.set(d.name, { k: 'stack', off: +loc, type: d.type });
+      if (d.init) {
+        const v = this.narrowed(this.expr(d.init), d.type, d.line);
+        this.emit(`${storeOp(d.type)} ${v.r}, ${loc}($sp)`, d.line, `เก็บ ${d.name} ในหน่วยความจำเพื่อใช้ &${d.name}`);
+        this.free(v);
       }
       return;
     }
@@ -371,45 +560,12 @@ class FnGen {
   // ---------- expressions ----------
 
   private constOf(e: Expr): number | null {
-    if (e.k === 'num') return e.v;
-    return null;
+    return constantInt(e, (x) => sizeOf(this.typeOf(x), x.line));
   }
 
   /** C type of an expression (before integer promotion). */
   private typeOf(e: Expr): Type {
-    switch (e.k) {
-      case 'num':
-        return e.v > 0x7fffffff ? 'uint' : 'int';
-      case 'var': {
-        const s = this.lookup(e.name, e.line);
-        return s.k === 'reg' || s.k === 'gvar' ? s.type : ptrTo(s.elem);
-      }
-      case 'bin': {
-        const lt = this.typeOf(e.l);
-        const rt = this.typeOf(e.r);
-        if (['<', '<=', '>', '>=', '==', '!=', '&&', '||'].includes(e.op)) return 'int';
-        if ((e.op === '+' || e.op === '-') && isPtr(lt) && !isPtr(rt)) return lt;
-        if (e.op === '-' && isPtr(lt) && isPtr(rt)) return 'int';
-        if (e.op === '<<' || e.op === '>>') return promote(lt);
-        return isUnsigned(lt) || isUnsigned(rt) ? 'uint' : 'int';
-      }
-      case 'un':
-        if (e.op === '&') return ptrTo(this.typeOf(e.e));
-        if (e.op === '*') return elemOf(this.typeOf(e.e));
-        if (e.op === '!') return 'int';
-        return promote(this.typeOf(e.e));
-      case 'index':
-        return elemOf(this.typeOf(e.a));
-      case 'assign':
-      case 'inc':
-        return this.typeOf(e.t);
-      case 'cond':
-        return this.typeOf(e.a);
-      case 'cast':
-        return e.to;
-      case 'call':
-        return this.unit.funcs.find((f) => f.name === e.name)?.ret ?? 'int';
-    }
+    return expressionType(e, (name, line) => this.lookup(name, line), this.unit);
   }
 
   /** Whether a comparison of `a` with `b` is unsigned (C converts both to unsigned if either is). */
@@ -422,6 +578,10 @@ class FnGen {
     const ln = e.line;
     const into = () => dest ?? this.alloc(ln);
     switch (e.k) {
+      case 'sizeof': {
+        const value = e.type ? sizeOf(e.type, ln) : sizeOf(this.typeOf(e.e!), ln);
+        return this.expr({ k: 'num', v: value, line: ln }, dest);
+      }
       case 'num': {
         if (!dest && e.v === 0) return { r: '$zero', t: 'int' };
         const d = into();
@@ -435,10 +595,11 @@ class FnGen {
           if (dest && dest !== s.r) this.emit(`move ${dest}, ${s.r}`, ln);
           return { r: dest ?? s.r, t: s.type };
         }
+        if (s.k === 'stack') return this.load(e, dest);
         const d = into();
         if (s.k === 'arr') this.emit(`addiu ${d}, $sp, ${s.off}`, ln, `address ของ ${e.name}[0] บน stack`);
         else if (s.k === 'garr') this.emit(`la   ${d}, ${s.label}`, ln);
-        else this.emit(`lw   ${d}, ${s.label}`, ln, `อ่านตัวแปร global ${e.name}`);
+        else this.emit(`${loadOp(s.type)} ${d}, ${s.label}`, ln, `อ่านตัวแปร global ${e.name}`);
         return { r: d, t: this.typeOf(e) };
       }
       case 'bin':
@@ -481,7 +642,8 @@ class FnGen {
       }
       case 'inc': {
         const ty = this.typeOf(e.t);
-        const step = isPtr(ty) ? 4 : 1;
+        if (isArray(ty)) throw new CError(ln, 'เพิ่มหรือลดค่าอาร์เรย์ทั้งก้อนไม่ได้');
+        const step = isPtr(ty) ? sizeOf(elemOf(ty), ln) : 1;
         const delta = e.op === '++' ? step : -step;
         if (e.t.k === 'var') {
           const s = this.lookup(e.t.name, ln);
@@ -501,7 +663,7 @@ class FnGen {
         // memory target: load, add, store
         const a = this.addr(e.t);
         const v = this.alloc(ln);
-        this.emit(`lw   ${v}, ${a.off}(${a.base})`, ln);
+        this.emit(`${loadOp(ty)} ${v}, ${a.off}(${a.base})`, ln);
         let old: string | null = null;
         if (e.post && !discard) {
           old = dest ?? this.alloc(ln);
@@ -509,7 +671,7 @@ class FnGen {
         }
         this.emit(`addiu ${v}, ${v}, ${delta}`, ln);
         this.narrow(v, ty, ln);
-        this.emit(`sw   ${v}, ${a.off}(${a.base})`, ln);
+        this.emit(`${storeOp(ty)} ${v}, ${a.off}(${a.base})`, ln);
         this.free(a.base);
         if (old) {
           this.free(v);
@@ -582,16 +744,22 @@ class FnGen {
       return { r: d, t: 'int' };
     }
 
-    const lt = this.typeOf(e.l);
-    const rt = this.typeOf(e.r);
-    const scale = (op === '+' || op === '-') && isPtr(lt) && !isPtr(rt) ? 4 : 1;
+    const lt = decay(this.typeOf(e.l));
+    const rt = decay(this.typeOf(e.r));
+    if (op === '+' && !isPtr(lt) && isPtr(rt)) return this.binary({ ...e, l: e.r, r: e.l }, dest);
+    if (isPtr(lt) && isPtr(rt) && op === '+') throw new CError(ln, 'บวก pointer สองตัวไม่ได้');
+    const scale = (op === '+' || op === '-') && isPtr(lt) && !isPtr(rt) ? sizeOf(elemOf(lt), ln) : 1;
     const resT = this.typeOf(e);
     // unsigned: / and % if either side is, >> if the left side is
     const uns = op === '>>' ? isUnsigned(lt) : isUnsigned(lt) || isUnsigned(rt);
     const l = this.expr(e.l);
     const k = this.constOf(e.r);
     // only the logical immediates take 0…65535; addiu's immediate is signed (handled above)
-    const IMM: Record<string, string> = { '&': 'andi', '|': 'ori', '^': 'xori' };
+    const IMM: Record<string, string> = {
+      '&': 'andi',
+      '|': 'ori',
+      '^': 'xori',
+    };
     if (k != null) {
       const kk = k * scale;
       let ins: string | null = null;
@@ -609,16 +777,19 @@ class FnGen {
       }
     }
     let r = this.expr(e.r);
-    if (scale === 4) {
-      const s = this.alloc(ln);
-      this.emit(`sll  ${s}, ${r.r}, 2`, ln, 'คูณ index ด้วย 4 เพราะ int ใช้ 4 byte');
-      this.free(r);
-      r = { r: s, t: 'int' };
-    }
+    if (scale !== 1) r = this.scaled(r, scale, ln);
     this.free(l);
     this.free(r);
     const d = dest ?? this.alloc(ln);
-    const R3: Record<string, string> = { '+': 'addu', '-': 'subu', '&': 'and', '|': 'or', '^': 'xor', '<<': 'sllv', '>>': uns ? 'srlv' : 'srav' };
+    const R3: Record<string, string> = {
+      '+': 'addu',
+      '-': 'subu',
+      '&': 'and',
+      '|': 'or',
+      '^': 'xor',
+      '<<': 'sllv',
+      '>>': uns ? 'srlv' : 'srav',
+    };
     if (R3[op]) this.emit(`${R3[op].padEnd(4)} ${d}, ${l.r}, ${r.r}`, ln);
     else if (op === '*') {
       this.emit(`mult ${l.r}, ${r.r}`, ln);
@@ -627,67 +798,75 @@ class FnGen {
       this.emit(`${uns ? 'divu' : 'div '} ${l.r}, ${r.r}`, ln, uns ? 'หารแบบไม่มีเครื่องหมาย (unsigned)' : undefined);
       this.emit(op === '/' ? `mflo ${d}` : `mfhi ${d}`, ln, op === '/' ? 'ผลหารอยู่ใน LO' : 'เศษอยู่ใน HI');
     } else throw new CError(ln, `ยังไม่รองรับตัวดำเนินการ ${op}`);
-    if (isPtr(lt) && isPtr(rt) && op === '-') this.emit(`sra  ${d}, ${d}, 2`, ln, 'หาร 4 ให้ได้จำนวนช่อง');
+    if (isPtr(lt) && isPtr(rt) && op === '-') {
+      const stride = sizeOf(elemOf(lt), ln);
+      if (JSON.stringify(elemOf(lt)) !== JSON.stringify(elemOf(rt))) throw new CError(ln, 'ลบ pointer ที่ชี้ข้อมูลต่างชนิดกันไม่ได้');
+      if (stride > 1) {
+        this.emit(`li $at, ${stride}`, ln);
+        this.emit(`div ${d}, $at`, ln);
+        this.emit(`mflo ${d}`, ln, 'หารด้วยขนาดสมาชิกเพื่อได้ระยะห่างเป็นจำนวนสมาชิก');
+      }
+    }
     return { r: d, t: resT };
   }
 
-  /** Computes the address of an lvalue as base register + constant offset. */
+  private scaled(v: Val, scale: number, line: number): Val {
+    if (scale === 1) return v;
+    const r = this.alloc(line);
+    if (isPow2(scale)) this.emit(`sll ${r}, ${v.r}, ${Math.log2(scale)}`, line, `คูณ index ด้วยขนาดสมาชิก ${scale} byte`);
+    else {
+      this.emit(`li ${r}, ${scale}`, line);
+      this.emit(`mult ${v.r}, ${r}`, line);
+      this.emit(`mflo ${r}`, line, `คูณ index ด้วยขนาดแถว ${scale} byte`);
+    }
+    this.free(v);
+    return { r, t: 'int' };
+  }
+  /** Computes an lvalue address once. Array expressions decay without reading memory. */
   private addr(e: Expr): { base: string; off: number } {
     const ln = e.line;
-    if (e.k === 'index') {
-      const k = this.constOf(e.i);
-      if (e.a.k === 'var') {
-        const s = this.lookup(e.a.name, ln);
-        if (s.k === 'arr') {
-          if (k != null) return { base: '$sp', off: s.off + 4 * k };
-          const i = this.expr(e.i);
-          this.free(i);
-          const t = this.alloc(ln);
-          this.emit(`sll  ${t}, ${i.r}, 2`, ln, 'คูณ index ด้วย 4 เพราะ int ใช้ 4 byte');
-          this.emit(`addu ${t}, $sp, ${t}`, ln, `address ของ ${exprText(e)} (นับจาก $sp)`);
-          return { base: t, off: s.off };
-        }
-      }
-      const base = this.expr(e.a);
-      if (k != null && fits16(4 * k)) return { base: base.r, off: 4 * k };
-      const i = this.expr(e.i);
-      this.free(i);
-      const t = this.alloc(ln);
-      this.emit(`sll  ${t}, ${i.r}, 2`, ln, 'คูณ index ด้วย 4 เพราะ int ใช้ 4 byte');
-      this.free(base);
-      this.emit(`addu ${t}, ${base.r}, ${t}`, ln, `บวกกับ address เริ่มต้นได้ address ของ ${exprText(e)}`);
-      return { base: t, off: 0 };
-    }
-    if (e.k === 'un' && e.op === '*') {
-      const p = e.e;
-      if (p.k === 'bin' && (p.op === '+' || p.op === '-')) {
-        const k = this.constOf(p.r);
-        if (k != null && isPtr(this.typeOf(p.l))) {
-          const b = this.expr(p.l);
-          return { base: b.r, off: (p.op === '+' ? 4 : -4) * k };
-        }
-      }
-      const b = this.expr(p);
-      return { base: b.r, off: 0 };
-    }
     if (e.k === 'var') {
       const s = this.lookup(e.name, ln);
-      if (s.k === 'gvar') {
-        const t = this.alloc(ln);
-        this.emit(`la   ${t}, ${s.label}`, ln);
-        return { base: t, off: 0 };
+      if (s.k === 'stack' || s.k === 'arr') return { base: '$sp', off: s.off };
+      if (s.k === 'gvar' || s.k === 'garr') {
+        const r = this.alloc(ln);
+        this.emit(`la ${r}, ${s.label}`, ln);
+        return { base: r, off: 0 };
       }
-      throw new CError(ln, `ใช้ & กับตัวแปร register "${e.name}" ไม่ได้ในชุดภาษาที่รองรับ`);
+      throw new CError(ln, `ตัวแปร ${e.name} ไม่มีที่อยู่ในหน่วยความจำ`);
     }
-    throw new CError(ln, 'ต้องเป็น a[i] หรือ *p');
+    if (e.k === 'un' && e.op === '*') {
+      this.typeOf(e);
+      const v = this.expr(e.e);
+      return { base: v.r, off: 0 };
+    }
+    if (e.k === 'index') {
+      const ty = this.typeOf(e),
+        stride = sizeOf(ty, ln),
+        k = this.constOf(e.i);
+      if (e.a.k === 'var') {
+        const s = this.lookup(e.a.name, ln);
+        if (s.k === 'arr' && k !== null && fits16(s.off + k * stride)) return { base: '$sp', off: s.off + k * stride };
+      }
+      const base = this.expr(e.a);
+      if (k !== null && fits16(k * stride)) return { base: base.r, off: k * stride };
+      const index = this.scaled(this.expr(e.i), stride, ln),
+        r = this.alloc(ln);
+      this.emit(`addu ${r}, ${base.r}, ${index.r}`, ln, `คำนวณ address ของ ${exprText(e)}`);
+      this.free(base);
+      this.free(index);
+      return { base: r, off: 0 };
+    }
+    throw new CError(ln, 'ต้องเป็นตัวแปร สมาชิกอาร์เรย์ หรือ *pointer');
   }
-
   private load(e: Expr, dest?: string): Val {
-    const a = this.addr(e);
+    const t = this.typeOf(e),
+      a = this.addr(e);
     this.free(a.base);
     const d = dest ?? this.alloc(e.line);
-    this.emit(`lw   ${d}, ${a.off}(${a.base})`, e.line, `อ่าน ${exprText(e)}`);
-    return { r: d, t: this.typeOf(e) };
+    if (isArray(t)) this.emit(`addiu ${d}, ${a.base}, ${a.off}`, e.line, 'address เริ่มต้นของแถว ไม่ได้อ่านค่าแถวเป็นจำนวนเต็ม');
+    else this.emit(`${loadOp(t)} ${d}, ${a.off}(${a.base})`, e.line, `อ่าน ${exprText(e)}`);
+    return { r: d, t: decay(t) };
   }
 
   private assign(e: Expr & { k: 'assign' }, dest?: string): Val {
@@ -704,9 +883,30 @@ class FnGen {
       if (s.k === 'arr' || s.k === 'garr') throw new CError(ln, `กำหนดค่าให้อาร์เรย์ ${e.t.name} ทั้งก้อนไม่ได้`);
     }
     const et = this.typeOf(e.t);
-    const v = this.narrowed(this.expr(value), et, ln);
+    if (isArray(et)) throw new CError(ln, 'กำหนดค่าอาร์เรย์หรือแถวทั้งก้อนไม่ได้');
     const a = this.addr(e.t);
-    this.emit(`sw   ${v.r}, ${a.off}(${a.base})`, ln, `เขียนค่าลง ${exprText(e.t)}`);
+    let v: Val;
+    if (e.op === '=') v = this.narrowed(this.expr(e.v), et, ln);
+    else {
+      const old = this.alloc(ln);
+      this.emit(`${loadOp(et)} ${old}, ${a.off}(${a.base})`, ln);
+      const name = '$lvalue';
+      this.scopes.push(new Map([[name, { k: 'reg', r: old, type: et }]]));
+      v = this.narrowed(
+        this.binary({
+          k: 'bin',
+          op: e.op.slice(0, -1),
+          l: { k: 'var', name, line: ln },
+          r: e.v,
+          line: ln,
+        }),
+        et,
+        ln,
+      );
+      this.scopes.pop();
+      if (v.r !== old) this.free(old);
+    }
+    this.emit(`${storeOp(et)} ${v.r}, ${a.off}(${a.base})`, ln, `เขียนค่าลง ${exprText(e.t)}`);
     this.free(a.base);
     if (dest) {
       this.emit(`move ${dest}, ${v.r}`, ln);
@@ -720,8 +920,7 @@ class FnGen {
     const ln = e.line;
     const f = this.unit.funcs.find((x) => x.name === e.name);
     if (!f) throw new CError(ln, `ไม่พบฟังก์ชัน "${e.name}"`);
-    if (f.params.length !== e.args.length)
-      throw new CError(ln, `ฟังก์ชัน ${e.name} ต้องการ ${f.params.length} อาร์กิวเมนต์ แต่ส่งมา ${e.args.length}`);
+    if (f.params.length !== e.args.length) throw new CError(ln, `ฟังก์ชัน ${e.name} ต้องการ ${f.params.length} อาร์กิวเมนต์ แต่ส่งมา ${e.args.length}`);
     const nested = e.args.some(hasCall);
     if (nested) {
       const vals = e.args.map((a) => this.expr(a));
@@ -804,11 +1003,7 @@ class FnGen {
       }
       this.free(t);
       const jumpWhenOne = sltTrue === jumpIf;
-      this.emit(
-        `${jumpWhenOne ? 'bne ' : 'beq '} ${t}, $zero, ${L}`,
-        ln,
-        jumpIf ? `คือเมื่อ \`${txt}\` เป็นจริง` : `คือเมื่อ \`${txt}\` เป็นเท็จ`,
-      );
+      this.emit(`${jumpWhenOne ? 'bne ' : 'beq '} ${t}, $zero, ${L}`, ln, jumpIf ? `คือเมื่อ \`${txt}\` เป็นจริง` : `คือเมื่อ \`${txt}\` เป็นเท็จ`);
       return;
     }
     const v = this.expr(e);
@@ -820,11 +1015,6 @@ class FnGen {
 function endLine(s: Stmt): number {
   return s.k === 'block' ? s.end : s.line;
 }
-
-const C_TYPE: Record<Type, string> = {
-  int: 'int', uint: 'unsigned', char: 'char', uchar: 'unsigned char', void: 'void',
-  ptr: 'int *', uptr: 'unsigned *', cptr: 'char *', ucptr: 'unsigned char *',
-};
 
 /** Short C rendering of an expression for explanations. */
 export function exprText(e: Expr): string {
@@ -847,8 +1037,10 @@ export function exprText(e: Expr): string {
       return `${e.name}(${e.args.map(exprText).join(', ')})`;
     case 'cond':
       return `${exprText(e.c)} ? ${exprText(e.a)} : ${exprText(e.b)}`;
+    case 'sizeof':
+      return `sizeof(${e.type ? typeText(e.type) : exprText(e.e!)})`;
     case 'cast':
-      return `(${C_TYPE[e.to]}) ${exprText(e.e)}`;
+      return `(${typeText(e.to)}) ${exprText(e.e)}`;
   }
 }
 
@@ -862,7 +1054,15 @@ export function explain(asm: string, nm: (r: string) => string = (r) => '`' + r 
     const x = /^(-?\d*)\((\$\w+)\)$/.exec(s);
     return x ? `${nm(x[2])} + ${x[1] || 0}` : s;
   };
-  const SYM: Record<string, string> = { and: 'AND', or: 'OR', xor: 'XOR', nor: 'NOR', andi: 'AND', ori: 'OR', xori: 'XOR' };
+  const SYM: Record<string, string> = {
+    and: 'AND',
+    or: 'OR',
+    xor: 'XOR',
+    nor: 'NOR',
+    andi: 'AND',
+    ori: 'OR',
+    xori: 'XOR',
+  };
   switch (mn) {
     case 'addi':
     case 'addiu': {
@@ -920,13 +1120,9 @@ export function explain(asm: string, nm: (r: string) => string = (r) => '`' + r 
     case 'sc':
       return `เขียน ${nm(o[0])} ลงที่ ${mem(o[1])} เฉพาะเมื่อยังจองอยู่ แล้วตั้ง ${nm(o[0])} = 1 ถ้าสำเร็จ / 0 ถ้าไม่สำเร็จ (store conditional)`;
     case 'beq':
-      return o[1] === '$zero'
-        ? `ถ้า ${nm(o[0])} = 0 ให้กระโดดไป \`${o[2]}\``
-        : `ถ้า ${nm(o[0])} = ${nm(o[1])} ให้กระโดดไป \`${o[2]}\``;
+      return o[1] === '$zero' ? `ถ้า ${nm(o[0])} = 0 ให้กระโดดไป \`${o[2]}\`` : `ถ้า ${nm(o[0])} = ${nm(o[1])} ให้กระโดดไป \`${o[2]}\``;
     case 'bne':
-      return o[1] === '$zero'
-        ? `ถ้า ${nm(o[0])} ≠ 0 ให้กระโดดไป \`${o[2]}\``
-        : `ถ้า ${nm(o[0])} ≠ ${nm(o[1])} ให้กระโดดไป \`${o[2]}\``;
+      return o[1] === '$zero' ? `ถ้า ${nm(o[0])} ≠ 0 ให้กระโดดไป \`${o[2]}\`` : `ถ้า ${nm(o[0])} ≠ ${nm(o[1])} ให้กระโดดไป \`${o[2]}\``;
     case 'j':
       return `กระโดดไปที่ \`${o[0]}\``;
     case 'jal':
@@ -953,6 +1149,16 @@ export function compileC(src: string): CompileResult {
     unit = parse(src);
   } catch (e) {
     if (e instanceof CError) return { ok: false, errors: [{ line: e.line, msg: e.message }] };
+    if (e instanceof RangeError)
+      return {
+        ok: false,
+        errors: [
+          {
+            line: 1,
+            msg: 'โค้ดซ้อนลึกหรือซับซ้อนเกินขอบเขต compiler สำหรับการเรียน',
+          },
+        ],
+      };
     throw e;
   }
   const errors: { line: number; msg: string }[] = [];
@@ -960,21 +1166,60 @@ export function compileC(src: string): CompileResult {
   const labels = new Labels(names);
   const globals = new Map<string, Store>();
   const data: OutLine[] = [];
+  const globalTypes = new Map<string, Store>();
+  for (const g of unit.globals)
+    globalTypes.set(g.name, g.size == null ? { k: 'gvar', label: g.name, type: g.type } : { k: 'garr', label: g.name, elem: g.type, shape: objectType(g) });
+  const globalLookup = (name: string, line: number) => {
+    const value = globalTypes.get(name);
+    if (!value) throw new CError(line, `ไม่ได้ประกาศตัวแปร ${name}`);
+    return value;
+  };
   for (const g of unit.globals) {
-    if (globals.has(g.name)) {
+    if (globals.has(g.name) || unit.funcs.some((f) => f.name === g.name)) {
       errors.push({ line: g.line, msg: `ประกาศตัวแปร "${g.name}" ซ้ำ` });
       continue;
     }
     names.add(g.name);
-    const vals = (g.initList ?? (g.init ? [g.init] : [])).map((e) => (e.k === 'num' ? e.v : NaN));
-    if (vals.some(Number.isNaN)) errors.push({ line: g.line, msg: `ค่าเริ่มต้นของตัวแปร global ${g.name} ต้องเป็นค่าคงที่` });
+    data.push({ asm: '.align 2', c: g.line });
+    let vals: number[] = [];
+    try {
+      vals = (g.initList ?? (g.init ? [g.init] : [])).map((e) => constantInt(e, (x) => sizeOf(expressionType(x, globalLookup, unit), x.line)) ?? NaN);
+    } catch (e) {
+      if (!(e instanceof CError)) throw e;
+      errors.push({ line: e.line, msg: e.message });
+    }
+    vals = vals.map((n) => (Number.isNaN(n) ? NaN : g.type === 'char' ? (n << 24) >> 24 : g.type === 'uchar' ? n & 255 : n));
+    if (vals.some(Number.isNaN))
+      errors.push({
+        line: g.line,
+        msg: `ค่าเริ่มต้นของตัวแปร global ${g.name} ต้องเป็นค่าคงที่`,
+      });
     if (g.size != null) {
-      globals.set(g.name, { k: 'garr', label: g.name, elem: g.type });
+      globals.set(g.name, {
+        k: 'garr',
+        label: g.name,
+        elem: g.type,
+        shape: objectType(g),
+      });
       const words = Array.from({ length: g.size }, (_, i) => vals[i] ?? 0);
-      data.push({ lbl: g.name + ':', c: g.line }, { asm: `.word ${words.join(', ')}`, c: g.line, ex: `อาร์เรย์ ${g.name} ${g.size} ช่อง` });
+      data.push(
+        { lbl: g.name + ':', c: g.line },
+        {
+          asm: `${sizeOf(g.type, g.line) === 1 ? '.byte' : '.word'} ${words.join(', ')}`,
+          c: g.line,
+          ex: `อาร์เรย์ ${g.name} ${g.size} ช่อง`,
+        },
+      );
     } else {
       globals.set(g.name, { k: 'gvar', label: g.name, type: g.type });
-      data.push({ lbl: g.name + ':', c: g.line }, { asm: `.word ${vals[0] ?? 0}`, c: g.line, ex: `ตัวแปร global ${g.name}` });
+      data.push(
+        { lbl: g.name + ':', c: g.line },
+        {
+          asm: `${sizeOf(g.type, g.line) === 1 ? '.byte' : '.word'} ${vals[0] ?? 0}`,
+          c: g.line,
+          ex: `ตัวแปร global ${g.name}`,
+        },
+      );
     }
   }
   const seen = new Set<string>();
@@ -988,12 +1233,22 @@ export function compileC(src: string): CompileResult {
     try {
       lines.push(...new FnGen(f, unit, globals, labels).run());
     } catch (e) {
-      if (!(e instanceof CError)) throw e;
-      errors.push({ line: e.line, msg: e.message });
+      if (e instanceof RangeError) errors.push({line:f.line,msg:'นิพจน์ซ้อนลึกเกินขอบเขต compiler สำหรับการเรียน'});
+      else if(e instanceof CError)errors.push({line:e.line,msg:e.message});
+      else throw e;
     }
   }
   if (errors.length) return { ok: false, errors };
   if (data.length) lines.push({ asm: '.data', c: 0 }, ...data);
   const asm = lines.map((l) => (l.lbl ? l.lbl : '    ' + l.asm)).join('\n');
-  return { ok: true, lines, asm, funcs: unit.funcs.map((f) => ({ name: f.name, params: f.params, ret: f.ret })) };
+  return {
+    ok: true,
+    lines,
+    asm,
+    funcs: unit.funcs.map((f) => ({
+      name: f.name,
+      params: f.params,
+      ret: f.ret,
+    })),
+  };
 }

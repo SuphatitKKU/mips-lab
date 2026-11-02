@@ -12,6 +12,9 @@ import { usePopup } from '../components/Popup';
 import { Modal } from '../components/Modal';
 import { Explainer, MemArt, RegArt, roleOf, smart, StepFlow } from '../components/RunVisuals';
 import { CodeLine, PageHeader, Rich, Segmented, Segs } from '../components/ui';
+import { EDUCATION_EXAMPLES } from '../lib/cc/examples';
+import { argumentArrayWidths } from '../lib/cc/arguments';
+import { isPtr } from '../lib/cc/parse';
 import { compileC, explain } from '../lib/cc/compile';
 import { liftMips } from '../lib/cc/lift';
 import { highlight } from '../lib/highlight';
@@ -87,6 +90,7 @@ const EXAMPLES: (SimHandoff & { key: string })[] = [
     source:
       '.data\nmsg:  .asciiz "สวัสดี MIPS\\n"\n\n.text\nmain:\n    li   $v0, 4        # print string\n    la   $a0, msg\n    syscall\n    li   $t0, 1\nloop:\n    move $a0, $t0\n    li   $v0, 1        # print int\n    syscall\n    addi $t0, $t0, 1\n    ble  $t0, 3, loop\n    li   $v0, 10       # exit\n    syscall',
   },
+  ...EDUCATION_EXAMPLES,
 ];
 
 const TINT: [string, string][] = [
@@ -315,6 +319,7 @@ export function Code() {
   }, [prog, comp]);
   const entry = entryPick && entries.includes(entryPick) ? entryPick : entries[0];
 
+  const entryFn = lang === 'c' && comp?.ok ? comp.funcs.find((f) => f.name === entry) : undefined;
   const reset = () => {
     if (!prog) {
       cpu.current = null;
@@ -329,7 +334,7 @@ export function Code() {
     }
     setArgErr(null);
     const arrays = args.filter(Array.isArray) as number[][];
-    const { mem, addrs } = layoutArrays(arrays, ARR_BASE);
+    const { mem, addrs } = layoutArrays(arrays, ARR_BASE, argumentArrayWidths(entryFn?.params ?? [], args));
     const regs: Partial<Record<RegName, number>> = {};
     let k = 0;
     args.forEach((v, i) => {
@@ -467,7 +472,6 @@ export function Code() {
   } else if (lang === 'mips' && mSel != null && mText(mSel)) {
     detail = { asm: mText(mSel), ex: explain(mText(mSel)), words: words.get(mSel)!, from: `โค้ดบรรทัด ${mSel}` };
   }
-  const entryFn = lang === 'c' && comp?.ok ? comp.funcs.find((f) => f.name === entry) : undefined;
 
   // ---------- editor marks ----------
   const marks = useMemo(() => {
@@ -530,9 +534,9 @@ export function Code() {
     const m = new Map<number, string>();
     const args = argText.map(parseArg);
     const arrays = args.filter(Array.isArray) as number[][];
-    const { addrs } = layoutArrays(arrays, ARR_BASE);
-    const names = entryFn ? entryFn.params.filter((p) => p.type === 'ptr').map((p) => p.name) : [];
-    arrays.forEach((arr, k) => arr.forEach((_, i) => m.set(addrs[k] + 4 * i, `${names[k] ?? `อาร์เรย์ ${k + 1}`}[${i}]`)));
+    const { addrs } = layoutArrays(arrays, ARR_BASE, argumentArrayWidths(entryFn?.params ?? [], args));
+    const names = entryFn ? entryFn.params.filter((p) => isPtr(p.type)).map((p) => p.name) : [];
+    arrays.forEach((arr, k) => arr.forEach((_, i) => m.set(addrs[k] + (argumentArrayWidths(entryFn?.params ?? [], args)[k] ?? 4) * i, `${names[k] ?? `อาร์เรย์ ${k + 1}`}[${i}]`)));
     if (prog) for (const [k, v] of prog.labels) if (v >= DATA_BASE) m.set(v, k);
     return m;
   }, [argText, entryFn, prog]);
@@ -602,6 +606,14 @@ export function Code() {
           }
         />
       </div>
+      {lang === 'c' && (
+        <details style={{ margin: '0 16px 12px', fontSize: 13, lineHeight: 1.7 }}>
+          <summary>ขอบเขตภาษา C และความสามารถใหม่</summary>
+          <p>รองรับ switch/case/default, sizeof, &amp;ตัวแปร, pointer และอาร์เรย์ 2 มิติขนาดคงที่ เลือกตัวอย่างใหม่จากเมนูด้านบน แล้วคลิกบรรทัด C เพื่อดูคำสั่ง MIPS ที่เกี่ยวข้อง</p>
+          <p>int และ pointer ใช้ 4 byte; char ใช้ 1 byte · อาร์เรย์ที่ป้อนเป็นพารามิเตอร์ใช้รายการแบนเรียงทีละแถว เช่น [1,2,3,4,5,6] สำหรับ 2×3</p>
+          <p>ยังไม่รองรับ struct, floating point, string/printf, preprocessor, VLA และพารามิเตอร์เกิน 4 ตัว</p>
+        </details>
+      )}
       {errors.length > 0 && (
         <div style={{ margin: '0 12px 12px' }}>
           <ErrList errors={errors} />
@@ -628,10 +640,10 @@ export function Code() {
                 {p.name} =
                 <input
                   className="mini-input"
-                  style={{ width: p.type === 'ptr' ? 130 : 84, background: '#fff' }}
+                  style={{ width: isPtr(p.type) ? 130 : 84, background: '#fff' }}
                   value={argText[i]}
-                  placeholder={p.type === 'ptr' ? '[3, 9, 4]' : '0'}
-                  title={p.type === 'ptr' ? 'อาร์เรย์ เช่น [3, 9, 4] — ถูกวางใน memory แล้วส่ง address ไปให้' : 'จำนวนเต็ม'}
+                  placeholder={isPtr(p.type) ? '[3, 9, 4]' : '0'}
+                  title={isPtr(p.type) ? 'อาร์เรย์ เช่น [3, 9, 4] — ถูกวางใน memory แล้วส่ง address ไปให้' : 'จำนวนเต็ม'}
                   onChange={(e) => setArgText(argText.map((t, k) => (k === i ? e.target.value : t)))}
                   onKeyDown={(e) => e.key === 'Enter' && reset()}
                 />

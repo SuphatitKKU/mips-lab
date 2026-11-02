@@ -34,6 +34,8 @@ npm run deploy
 
 บัญชี production อยู่ `private/remote-admin.json` ห้าม commit โฟลเดอร์ private, SQL seed, database dump หรือ credentials
 
+ฟีเจอร์ใหม่: `switch`, `sizeof`, `&ตัวแปร` และอาร์เรย์ 2 มิติ พร้อม [ตัวอย่างและขอบเขตภาษา](docs/c-education-features.md)
+
 อ่าน [คู่มือ deploy/ใช้งาน](docs/cloudflare-deployment.md) และ [ผลตรวจ compiler/ระบบเดิม](docs/compiler-and-system-audit.md)
 
 ## ที่มาของโจทย์

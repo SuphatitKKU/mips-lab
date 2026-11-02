@@ -15,10 +15,10 @@
 
 ## สิ่งที่รองรับ
 
-- `int`, `unsigned int`, `char`, `unsigned char`, `void`, pointer และ array หนึ่งมิติ
+- `int`, `unsigned int`, `char`, `unsigned char`, `void`, pointer หลายระดับ และ array หนึ่ง/สองมิติ
 - ตัวแปร local/global, local array, การอ่าน/เขียน memory ผ่าน pointer/array
 - ฟังก์ชัน การเรียกซ้อน recursion และ return; พารามิเตอร์ไม่เกิน 4 ตัวผ่าน `$a0–$a3`
-- `if/else`, `while`, `do/while`, `for`, `break`, `continue`
+- `if/else`, `while`, `do/while`, `for`, `break`, `continue`, `switch/case/default` พร้อม fall-through
 - arithmetic, comparison, bitwise, logical short circuit, ternary, assignment และ increment/decrement
 - ฟังก์ชัน leaf ใช้ `$t` registers; ฟังก์ชันที่เรียกฟังก์ชันอื่นใช้ `$s` registers และ stack frame พร้อมบันทึก/คืน `$ra`
 - แปลง MIPS → C ได้ด้วย lifter ของโปรเจกต์ แต่ไม่ได้ย้อนกลับเป็น source เดิม หรือเป็น decompiler สำหรับ executable ทั่วไป
@@ -26,16 +26,17 @@
 ## ข้อจำกัดที่สำคัญ
 
 - ไม่ใช่ compiler C เต็มมาตรฐาน และไม่ใช่เครื่องมือสร้าง native executable
-- ไม่รองรับ `struct`, `union`, floating point, `printf`/string literal, `switch`, `goto`, `sizeof`, `long`, `short`, `static local`, array 2 มิติ และ comma operator
-- address-of ตัวแปรที่เก็บใน register ยังไม่รองรับ
+- ไม่รองรับ `struct`, `union`, floating point, `printf`/string literal, `goto`, `long`, `short`, `static local`, VLA, array มากกว่า 2 มิติ และ comma operator
+- รองรับ `&` ของ local/parameter/global โดยตัวแปรที่มีการใช้ address จะเก็บบน stack และอ่าน/เขียนจริงผ่าน pointer
+- รองรับ `sizeof(type)` / `sizeof expression` / ขนาดอาร์เรย์เต็มและรายแถว โดยไม่รัน operand
 - ฟังก์ชันที่เรียกฟังก์ชันอื่นมีพารามิเตอร์และตัวแปร scalar รวมได้ไม่เกิน 8 ตัวตามจำนวน `$s` registers; leaf functions ก็มีขีดจำกัด register
-- global initializer รองรับค่าคงที่ ไม่ใช่ expression ทั่วไป
-- preprocessor lines ถูกข้าม ไม่ได้ประมวลผล `#include`, `#define` หรือ conditional compilation จริง
+- global initializer รองรับ integer constant expressions และ sizeof ที่ทราบชนิดข้อมูล แต่ไม่เรียกฟังก์ชันหรือเก็บ address ของ global เป็น initializer
+- preprocessor เช่น `#include`, `#define`, `#if` จะถูกปฏิเสธด้วยข้อความอธิบาย ไม่ข้ามแล้วแปลงต่อเงียบ ๆ
 - simulator มี instruction budget เพื่อหยุดโปรแกรมไม่จบ การตรวจบน Cloudflare ยังขึ้นกับ CPU quota ของบัญชี ควรใช้ test case ขนาดเล็กตามขอบเขตการเรียน
 
 ## หลักฐานทดสอบ
 
-ชุด `compiler.suite.test.ts` มี 104 tests หลังประกอบคลังโจทย์กลับมา ครอบคลุมโปรแกรมจริง, calling convention, 400 random expressions × 5 inputs, 200 random programs × 5 inputs, C → MIPS → C และกรณีที่ต้องปฏิเสธภาษานอก subset ส่วน `cc.test.ts` มีอีก 9 tests
+ชุด `compiler.suite.test.ts` ครอบคลุมทั้งความสามารถเดิมและฟีเจอร์ใหม่ (เพิ่ม positive tests แทนกรณีที่เดิมต้อง reject) ครอบคลุมโปรแกรมจริง, calling convention, 400 random expressions × 5 inputs, 200 random programs × 5 inputs, C → MIPS → C และกรณีที่ต้องปฏิเสธภาษานอก subset ส่วน `cc.test.ts` มีอีก 9 tests
 
 ## ส่วนไหนเป็นของจริง / ส่วนไหนหายหรือยังไม่พร้อม
 
@@ -52,3 +53,5 @@
 | บัญชีทดลอง/คะแนนตัวอย่าง | ไม่ seed นักศึกษาปลอมหรืออันดับปลอมลง production; test data ใช้เฉพาะ local D1 |
 
 ชั้นปีใช้เลข 2 หลักแรกเป็นปีที่เข้าเรียน เช่น 66 → 2566 และ `ปีการศึกษาปัจจุบัน - ปีที่เข้า + 1` อาจารย์ตั้งปีการศึกษาและ override ชั้นปีรายคนได้ เพราะรหัสไม่บอกการพักการเรียนหรือการซ้ำชั้น
+
+รายละเอียดฟีเจอร์และขอบเขตใหม่: [C สำหรับการเรียน](c-education-features.md)

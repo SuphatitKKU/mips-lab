@@ -669,16 +669,18 @@ export function labelAt(prog: Program, addr: number): string {
 
 // ---------- array helpers used by problems and the simulator ----------
 
-/** Lays out int arrays as words starting at `base`; returns the bytes and each array's address. */
-export function layoutArrays(arrays: number[][], base: number) {
+/** Lays out arrays as words (or bytes for char) starting at `base`; returns the bytes and each array's address. */
+export function layoutArrays(arrays: number[][], base: number, widths: number[] = []) {
   const mem = new Map<number, number>();
   const addrs: number[] = [];
   let a = base;
-  for (const arr of arrays) {
+  for (const [index, arr] of arrays.entries()) {
+    const width = widths[index] === 1 ? 1 : 4;
+    a = (a + 3) & ~3;
     addrs.push(a);
     for (const v of arr) {
-      for (let i = 0; i < 4; i++) mem.set(a + i, (v >>> (8 * (3 - i))) & 0xff);
-      a += 4;
+      for (let i = 0; i < width; i++) mem.set(a + i, (v >>> (8 * (width - 1 - i))) & 0xff);
+      a += width;
     }
     a += 16; // gap so overruns show up as wrong values rather than the next array
   }
