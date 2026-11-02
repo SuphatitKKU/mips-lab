@@ -1,11 +1,10 @@
 // Classes, roster, assignments, the delete-wipes-scores rule, backups and the
-// similar-code check — against a throwaway database in the OS temp folder.
+// audit log — against a throwaway database in the OS temp folder.
 
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { findSimilar, similarity, tokens } from './similarity';
 
 const dir = mkdtempSync(join(tmpdir(), 'mipslab-test-'));
 process.env.MIPSLAB_DB = join(dir, 'test.db');
@@ -32,7 +31,7 @@ function student(classId: number | null = null, sid?: string) {
 }
 const count = (table: string, userId: number) => (store.db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE user_id = ?`).get(userId) as { n: number }).n;
 function work(userId: number, pid = 1) {
-  store.markSolved(userId, pid, 'add $v0, $a0, $a1\njr $ra');
+  store.markSolved(userId, pid);
   store.recordAttempt(userId, pid, 'submit', 1, 1, {});
   store.saveDraft(userId, pid + 1, 'x');
   store.reveal(userId, pid + 2);
@@ -158,51 +157,38 @@ describe('backups and audit', () => {
   });
 });
 
-describe('similar code', () => {
-  const a = `
-main:   addi $t0, $zero, 0      # sum
-        addi $t1, $zero, 1
-loop:   bgt  $t1, $a0, done
-        add  $t0, $t0, $t1
-        addi $t1, $t1, 1
-        j    loop
-done:   move $v0, $t0
-        jr   $ra`;
-  // same program: labels renamed, comments and spacing changed
-  const b = `start: addi $t0,$zero,0
- addi $t1,$zero,1
-again: bgt $t1,$a0,finish   ; z80-style comment
- add $t0,$t0,$t1
- addi $t1,$t1,1
- j again
-finish: move $v0,$t0
- jr $ra`;
-  const other = `
-        li   $v0, 0
-        blez $a0, out
-top:    add  $v0, $v0, $a0
-        addi $a0, $a0, -1
-        bgtz $a0, top
-out:    jr   $ra`;
+describe('Z80 board projects', () => {
+  const board = { parts: [{ id: 'kit1', type: 'KIT', x: 0, y: 0 }], wires: [] };
+  it('students hand in, re-hand in until graded, and late hand-ins are marked', () => {
+    const c = store.listClasses()[0];
+    const other = store.createClass('OTHER', c.year, c.term);
+    const s = student(c.id);
+    const outsider = student(other.id);
+    const late = store.createProject(c.id, 'ไฟวิ่ง', 'ต่อ LED 8 ดวง', Date.now() - 1000);
+    const open = store.createProject(c.id, 'ปุ่มกด', '', null);
+    const me = store.userById(s)!;
 
-  it('sees through renamed labels and comments', () => {
-    expect(tokens(a)).toEqual(tokens(b));
-    expect(similarity(a, b)).toBe(1);
-    expect(similarity(a, other)).toBeLessThan(0.5);
-  });
+    expect(() => store.submitProject(store.userById(outsider)!, open.id, { name: 'x', board, code: '', note: '' })).toThrow(/ไม่พบงานนี้ในห้องของคุณ/);
+    expect(() => store.submitProject(me, open.id, { name: 'x', board: { parts: 1 }, code: '', note: '' })).toThrow(/ข้อมูลบอร์ด/);
 
-  it('pairs only near-identical answers to the same problem, skipping short ones', () => {
-    const pairs = findSimilar(
-      [
-        { userId: 1, problemId: 7, code: a },
-        { userId: 2, problemId: 7, code: b },
-        { userId: 3, problemId: 7, code: other },
-        { userId: 4, problemId: 8, code: a }, // other problem
-        { userId: 5, problemId: 9, code: 'jr $ra' },
-        { userId: 6, problemId: 9, code: 'jr $ra' }, // too short to judge
-      ],
-      0.85,
-    );
-    expect(pairs).toEqual([{ problemId: 7, a: 1, b: 2, similarity: 1 }]);
+    expect(store.submitProject(me, late.id, { name: 'v1', board, code: 'NOP', note: '' }).submission).toMatchObject({ name: 'v1', late: true });
+    const first = store.submitProject(me, open.id, { name: 'v1', board, code: 'NOP', note: 'ลองดู' }).submission!;
+    const again = store.submitProject(me, open.id, { name: 'v2', board, code: 'HALT', note: '' }).submission!;
+    expect(again.id).toBe(first.id); // replaced, not duplicated
+    expect(store.submissionById(again.id)).toMatchObject({ name: 'v2', code: 'HALT', late: false, board });
+
+    store.gradeSubmission(again.id, 8.5, 'ดีมาก');
+    expect(store.myProjects(me).find((p) => p.id === open.id)?.submission).toMatchObject({ score: 8.5, feedback: 'ดีมาก' });
+    expect(() => store.submitProject(me, open.id, { name: 'v3', board, code: '', note: '' })).toThrow(/ตรวจงานนี้แล้ว/);
+
+    const list = store.projectSubmissions(open.id).rows;
+    expect(list.find((r) => r.user.id === s)?.submission?.score).toBe(8.5);
+    expect(list.some((r) => r.user.id === outsider)).toBe(false);
+    expect(store.listProjects().find((p) => p.id === open.id)).toMatchObject({ submitted: 1, graded: 1 });
+
+    // deleting the class wipes hand-ins along with the rest of the students' work
+    store.deleteClass(c.id);
+    expect(count('submissions', s)).toBe(0);
+    expect(store.projectById(open.id)).toBeNull();
   });
 });

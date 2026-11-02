@@ -12,7 +12,8 @@ import { attachLive, notifyChanged } from './live';
 import { termText } from '../src/lib/terms';
 
 const app = express();
-app.use(express.json({ limit: '200kb' }));
+// 2 MB: a handed-in Z80 project carries the whole board (parts and wires) plus its program
+app.use(express.json({ limit: '2mb' }));
 
 // any successful change (submit, join, sign-up, edits…) nudges open teacher pages to refresh;
 // draft autosaves don't change anything the teacher sees, so they're skipped
@@ -57,7 +58,7 @@ function requireClass(req: Request, res: Response, next: NextFunction) {
   }
   next();
 }
-for (const path of ['/api/problems', '/api/leaderboard', '/api/me']) app.use(path, (req, res, next) => auth(req, res, () => requireClass(req, res, next)));
+for (const path of ['/api/problems', '/api/leaderboard', '/api/me', '/api/projects']) app.use(path, (req, res, next) => auth(req, res, () => requireClass(req, res, next)));
 
 function teacherOnly(req: Request, res: Response, next: NextFunction) {
   if ((req as Authed).user.role !== 'teacher') {
@@ -315,10 +316,97 @@ app.post('/api/teacher/stats', auth, teacherOnly, wrap((req, res) => {
   res.json(store.problemStats(ids(req.body?.ids)));
 }));
 
-/** Nearly identical passing code among the given students. */
-app.post('/api/teacher/similar', auth, teacherOnly, wrap((req, res) => {
-  const t = Number(req.body?.threshold);
-  res.json({ pairs: store.similarCode(ids(req.body?.ids), t >= 0.5 && t <= 1 ? t : 0.85) });
+// ---------- Z80 board projects ----------
+
+/** "2026-11-09T23:59" style or ms → ms; null clears; undefined = not given */
+const dueOf = (v: unknown) => (v === null || v === '' ? null : v === undefined ? undefined : Number(typeof v === 'string' && !/^\d+$/.test(v) ? new Date(v).getTime() : v));
+function projectError(res: Response, e: unknown) {
+  if (!(e instanceof store.ProfileError)) throw e;
+  res.status(400).json({ error: e.message });
+}
+
+app.get('/api/teacher/projects', auth, teacherOnly, wrap((_req, res) => {
+  res.json({ projects: store.listProjects() });
+}));
+
+app.post('/api/teacher/projects', auth, teacherOnly, wrap((req, res) => {
+  const b = req.body ?? {};
+  try {
+    const p = store.createProject(Number(b.classId), str(b.title) ?? '', str(b.detail) ?? '', dueOf(b.dueAt) ?? null);
+    const c = store.classById(p.classId)!;
+    store.audit(req.user, 'สั่งงานโปรเจกต์', `${c.name} · ${termText(c)}: ${p.title}`);
+    res.json({ project: p });
+  } catch (e) {
+    projectError(res, e);
+  }
+}));
+
+app.patch('/api/teacher/projects/:id', auth, teacherOnly, wrap((req, res) => {
+  const b = req.body ?? {};
+  try {
+    res.json({ project: store.updateProject(Number(req.params.id), { title: str(b.title), detail: str(b.detail), dueAt: dueOf(b.dueAt) }) });
+  } catch (e) {
+    projectError(res, e);
+  }
+}));
+
+app.delete('/api/teacher/projects/:id', auth, teacherOnly, wrap((req, res) => {
+  const p = store.projectById(Number(req.params.id));
+  try {
+    store.deleteProject(Number(req.params.id));
+    if (p) store.audit(req.user, 'ลบงานโปรเจกต์', p.title);
+    res.json({ ok: true });
+  } catch (e) {
+    projectError(res, e);
+  }
+}));
+
+app.get('/api/teacher/projects/:id/submissions', auth, teacherOnly, wrap((req, res) => {
+  try {
+    res.json(store.projectSubmissions(Number(req.params.id)));
+  } catch (e) {
+    projectError(res, e);
+  }
+}));
+
+/** A hand-in with its board and program, to open on the board page. */
+app.get('/api/teacher/submissions/:id', auth, teacherOnly, wrap((req, res) => {
+  const s = store.submissionById(Number(req.params.id));
+  if (!s) {
+    res.status(404).json({ error: 'ไม่พบงานที่ส่งนี้' });
+    return;
+  }
+  res.json({ submission: s });
+}));
+
+app.patch('/api/teacher/submissions/:id', auth, teacherOnly, wrap((req, res) => {
+  const b = req.body ?? {};
+  const score = b.score === null || b.score === '' || b.score === undefined ? null : Number(b.score);
+  try {
+    const s = store.gradeSubmission(Number(req.params.id), score, str(b.feedback) ?? '');
+    store.audit(req.user, 'ให้คะแนนโปรเจกต์', `${s.student.name} · ${s.project.title}: ${score ?? '—'}`);
+    res.json({ submission: { ...s, board: undefined, code: undefined } });
+  } catch (e) {
+    projectError(res, e);
+  }
+}));
+
+/** The student's class projects with what they handed in. */
+app.get('/api/projects', auth, wrap((req, res) => {
+  res.json({ projects: store.myProjects(req.user) });
+}));
+
+app.post('/api/projects/:id/submit', auth, wrap((req, res) => {
+  if (req.user.role !== 'student') {
+    res.status(400).json({ error: 'ส่งงานได้เฉพาะบัญชีนักศึกษา' });
+    return;
+  }
+  const b = req.body ?? {};
+  try {
+    res.json({ project: store.submitProject(req.user, Number(req.params.id), { name: str(b.name) ?? '', board: b.board, code: str(b.code) ?? '', note: str(b.note) ?? '' }) });
+  } catch (e) {
+    projectError(res, e);
+  }
 }));
 
 app.get('/api/teacher/audit', auth, teacherOnly, wrap((_req, res) => {
@@ -564,7 +652,7 @@ function run(kind: 'test' | 'submit') {
     const pass = !result.errors.length && result.passed === result.total;
     let awarded: number | null = null;
     // points are computed before this attempt is recorded so the first submit counts as first try
-    if (kind === 'submit' && pass) awarded = store.markSolved(uid, p.id, code);
+    if (kind === 'submit' && pass) awarded = store.markSolved(uid, p.id);
     store.recordAttempt(uid, p.id, kind, result.passed, result.total, result);
     res.json({ ...result, kind, pass, awarded, alreadySolved: kind === 'submit' && pass && awarded == null });
   });

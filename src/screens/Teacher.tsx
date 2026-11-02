@@ -10,7 +10,8 @@ import { useLive, type LiveStatus } from '../components/live';
 import { classLabel } from '../lib/terms';
 import { RoleChip } from './Settings';
 import { byYear, ClassesPanel, ClassExport, type ClassRow, type ExportKind } from './TeacherClasses';
-import { AuditPanel, ProgressModal, SimilarPanel, StatsPanel } from './TeacherInsights';
+import { AuditPanel, ProgressModal, StatsPanel } from './TeacherInsights';
+import { ProjectsPanel } from './TeacherProjects';
 
 interface UserRow extends Me {
   id: number;
@@ -151,7 +152,7 @@ export function Teacher() {
     await (kind === 'csv' ? Promise.resolve(exportCsv(info)) : kind === 'docx' ? exportDocx(info) : exportPdf(info));
   };
 
-  /** Students on screen right now (for the stats and similar-code panels). */
+  /** Students on screen right now (for the stats panel). */
   const shownStudentIds = rows.filter((u) => u.role === 'student').map((u) => u.id);
 
   /** What's on screen (students only, current filters), ordered by student id, for Excel / Word / PDF. */
@@ -389,8 +390,8 @@ export function Teacher() {
           )}
         </section>
 
+        {data && <ProjectsPanel classes={data.classes} version={version} />}
         <StatsPanel ids={shownStudentIds} version={version} />
-        <SimilarPanel ids={shownStudentIds} />
         <AuditPanel version={version} />
         {viewing != null && <ProgressModal userId={viewing} onClose={() => setViewing(null)} />}
 

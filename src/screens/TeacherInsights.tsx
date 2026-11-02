@@ -1,5 +1,5 @@
 // Teacher page extras: one student's progress, per-problem stats for the filtered
-// students, nearly identical code, the action history, and assigning problems.
+// students, the action history, and assigning problems.
 
 import { useEffect, useMemo, useState } from 'react';
 import { api, ApiError, useApi } from '../api';
@@ -172,90 +172,6 @@ export function StatsPanel({ ids, version }: { ids: number[]; version: number })
           </ol>
           <span style={{ fontSize: 12, color: 'var(--muted)' }}>ตัวเลข = ผ่าน / ลองแล้ว / นักศึกษาทั้งหมด</span>
         </>
-      )}
-    </section>
-  );
-}
-
-// ---------- similar code ----------
-
-interface Pair {
-  problem: { id: number; title: string };
-  a: { id: number; name: string; studentId: string; code: string };
-  b: { id: number; name: string; studentId: string; code: string };
-  similarity: number;
-}
-
-export function SimilarPanel({ ids }: { ids: number[] }) {
-  const [pairs, setPairs] = useState<Pair[] | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState('');
-  const [view, setView] = useState<Pair | null>(null);
-  const run = async () => {
-    setBusy(true);
-    setErr('');
-    try {
-      setPairs((await api<{ pairs: Pair[] }>('/teacher/similar', { body: { ids } })).pairs);
-    } catch (e) {
-      setErr((e as ApiError).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <section aria-label="ตรวจโค้ดคล้ายกัน" className="card" style={{ padding: '18px 24px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-        <Icon d={ICON.eye} size={19} color="var(--m)" />
-        <span style={{ flex: '1 1 240px' }}>
-          <b style={{ fontFamily: 'var(--head)', fontWeight: 500, fontSize: 18 }}>ตรวจโค้ดคล้ายกัน</b>
-          <span style={{ display: 'block', fontSize: 13, color: 'var(--muted)' }}>
-            หาคู่ที่ส่งโค้ดเกือบเหมือนกัน (≥ 85%) ในข้อเดียวกัน — เปลี่ยนชื่อ label/ตัวแปร หรือเว้นวรรคต่างกันก็ยังจับได้ · ข้อสั้นมากถูกข้าม
-          </span>
-        </span>
-        <button type="button" className="btn btn-secondary" style={{ height: 40 }} onClick={run} disabled={busy || ids.length < 2} aria-busy={busy}>
-          {pairs ? 'ตรวจอีกครั้ง' : `ตรวจ ${ids.length} คน`}
-        </button>
-      </div>
-      {err && <div className="notice err">{err}</div>}
-      {pairs && !pairs.length && <div className="notice ok">ไม่พบโค้ดที่คล้ายกันผิดปกติ</div>}
-      {pairs && pairs.length > 0 && (
-        <>
-          <span style={{ fontSize: 13, color: 'var(--muted)' }}>
-            พบ {pairs.length} คู่ · ความคล้ายสูงไม่ได้แปลว่าลอกเสมอ (โจทย์ง่ายมักเขียนออกมาคล้ายกัน) — เปิดดูโค้ดก่อนตัดสิน
-          </span>
-          <ol style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {pairs.map((p, i) => (
-              <li key={i}>
-                <button type="button" className="prob-row" style={{ width: '100%', textAlign: 'left', border: 0, cursor: 'pointer', padding: '10px 12px' }} onClick={() => setView(p)}>
-                  <span className="chip" style={{ background: p.similarity >= 0.95 ? 'var(--err-bg)' : 'var(--warn-bg)', color: p.similarity >= 0.95 ? 'var(--err-deep)' : 'var(--warn-deep)' }}>
-                    {Math.round(p.similarity * 100)}%
-                  </span>
-                  <span style={{ flex: 1, minWidth: 0 }}>
-                    <b style={{ fontWeight: 600 }}>{p.a.name}</b> ↔ <b style={{ fontWeight: 600 }}>{p.b.name}</b>
-                    <span style={{ display: 'block', fontSize: 13, color: 'var(--muted)' }}>
-                      ข้อ {p.problem.id}. {p.problem.title}
-                    </span>
-                  </span>
-                  <span style={{ fontSize: 13, color: 'var(--m)' }}>ดูโค้ด</span>
-                </button>
-              </li>
-            ))}
-          </ol>
-        </>
-      )}
-      {view && (
-        <Modal wide title={`ข้อ ${view.problem.id} · คล้ายกัน ${Math.round(view.similarity * 100)}%`} onClose={() => setView(null)}>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
-            {[view.a, view.b].map((s) => (
-              <div key={s.id} style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 }}>
-                <b style={{ fontWeight: 600 }}>
-                  {s.name} <span style={{ color: 'var(--muted)', fontWeight: 400, fontFamily: 'var(--mono)', fontSize: 13 }}>{s.studentId}</span>
-                </b>
-                <pre className="code-compare">{s.code}</pre>
-              </div>
-            ))}
-          </div>
-        </Modal>
       )}
     </section>
   );

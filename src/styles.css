@@ -3880,7 +3880,7 @@ details.more summary {
   }
 }
 
-/* teacher insights: small tables, collapsible panel header, side-by-side code */
+/* teacher insights: small tables, collapsible panel header */
 .mini-table {
   width: 100%;
   border-collapse: collapse;
@@ -3917,18 +3917,6 @@ details.more summary {
   outline: 2px solid var(--m);
   outline-offset: 4px;
   border-radius: 8px;
-}
-.code-compare {
-  margin: 0;
-  padding: 12px 14px;
-  border-radius: 12px;
-  background: var(--soft);
-  font-family: var(--mono);
-  font-size: 13px;
-  line-height: 1.55;
-  overflow: auto;
-  max-height: 60vh;
-  white-space: pre;
 }
 
 /* teacher list: student name opens their progress */

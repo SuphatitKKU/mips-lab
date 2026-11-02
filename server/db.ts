@@ -8,7 +8,6 @@ import type * as Sqlite from 'node:sqlite';
 const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as typeof Sqlite;
 import { FIRST_TRY_BONUS, POINTS, PROBLEMS, problemById } from '../src/data/problems';
 import { CODE_ALPHABET, CODE_LEN, termOf, termText, type ClassInfo } from '../src/lib/terms';
-import { findSimilar } from './similarity';
 
 const DB_PATH = resolve(process.env.MIPSLAB_DB ?? 'data/mipslab.db');
 mkdirSync(dirname(DB_PATH), { recursive: true });
@@ -94,6 +93,29 @@ CREATE TABLE IF NOT EXISTS assignments (
   due_at INTEGER NOT NULL,
   PRIMARY KEY (class_id, problem_id)
 );
+-- Z80 board projects a teacher set for a class, and what students handed in
+CREATE TABLE IF NOT EXISTS projects (
+  id INTEGER PRIMARY KEY,
+  class_id INTEGER NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  due_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS submissions (
+  id INTEGER PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  board TEXT NOT NULL,
+  code TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  submitted_at INTEGER NOT NULL,
+  score REAL,
+  feedback TEXT,
+  graded_at INTEGER,
+  UNIQUE (project_id, user_id)
+);
 -- what teachers did (who deleted which class, …), newest first on the teacher page
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY,
@@ -103,8 +125,8 @@ CREATE TABLE IF NOT EXISTS audit (
   detail TEXT NOT NULL
 );
 `);
-// the passing code is kept with each solve, for the similar-code check
-if (!(db.prepare('PRAGMA table_info(solves)').all() as { name: string }[]).some((c) => c.name === 'code')) db.exec('ALTER TABLE solves ADD COLUMN code TEXT');
+// the similar-code check was removed: drop the code it kept with each solve
+if ((db.prepare('PRAGMA table_info(solves)').all() as { name: string }[]).some((c) => c.name === 'code')) db.exec('ALTER TABLE solves DROP COLUMN code');
 
 // columns added after the first release
 const userCols = new Set((db.prepare('PRAGMA table_info(users)').all() as { name: string }[]).map((c) => c.name));
@@ -161,7 +183,9 @@ function newSession(userId: number): string {
 }
 
 /** The current class as "SEC 1 · 2/2569" (same as classLabel), for a users row named `t`. */
-const sectionSql = (t: string) => `COALESCE((SELECT c.name || ' · ' || CASE c.term WHEN 3 THEN 'พิเศษ' ELSE c.term END || '/' || c.year FROM classes c WHERE c.id = ${t}.class_id), '')`;
+/** "SEC 1 · 2/2569" for a classes row named `c` (same as classLabel). */
+const sectionLabelSql = (c: string) => `${c}.name || ' · ' || CASE ${c}.term WHEN 3 THEN 'พิเศษ' ELSE ${c}.term END || '/' || ${c}.year`;
+const sectionSql = (t: string) => `COALESCE((SELECT ${sectionLabelSql('c')} FROM classes c WHERE c.id = ${t}.class_id), '')`;
 const userColsOf = (t: string) =>
   `${t}.id, ${t}.student_id, ${t}.name, ${t}.role, ${t}.email, ${t}.class_id, ${sectionSql(t)} AS section,
    COALESCE((SELECT c.archived FROM classes c WHERE c.id = ${t}.class_id), 0) AS class_archived`;
@@ -413,7 +437,7 @@ export function deleteClass(id: number): { wiped: number; backup: string | null 
   const saved = ids.length ? backup(`before-delete-class-${id}-${new Date().toISOString().replace(/[:.]/g, '-')}`) : null;
   db.exec('BEGIN');
   try {
-    for (const t of ['solves', 'attempts', 'drafts', 'reveals']) db.prepare(`DELETE FROM ${t} WHERE user_id IN (SELECT id FROM users WHERE class_id = ? AND role = 'student')`).run(id);
+    for (const t of ['solves', 'attempts', 'drafts', 'reveals', 'submissions']) db.prepare(`DELETE FROM ${t} WHERE user_id IN (SELECT id FROM users WHERE class_id = ? AND role = 'student')`).run(id);
     db.prepare('UPDATE users SET class_id = NULL WHERE class_id = ?').run(id);
     db.prepare('DELETE FROM roster WHERE class_id = ?').run(id);
     db.prepare('DELETE FROM classes WHERE id = ?').run(id);
@@ -657,17 +681,16 @@ export function pointsFor(userId: number, pid: number): { points: number; firstT
   return { points: base + (firstTry ? FIRST_TRY_BONUS : 0), firstTry, revealed };
 }
 
-export function markSolved(userId: number, pid: number, code: string | null = null): number | null {
+export function markSolved(userId: number, pid: number): number | null {
   if (solve(userId, pid)) return null;
   const { points, firstTry, revealed } = pointsFor(userId, pid);
-  db.prepare('INSERT INTO solves (user_id, problem_id, points, first_try, revealed, solved_at, code) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+  db.prepare('INSERT INTO solves (user_id, problem_id, points, first_try, revealed, solved_at) VALUES (?, ?, ?, ?, ?, ?)').run(
     userId,
     pid,
     points,
     +firstTry,
     +revealed,
     Date.now(),
-    code,
   );
   return points;
 }
@@ -812,7 +835,7 @@ export function dueMap(user: User): Map<number, number> {
   return new Map(user.class_id == null ? [] : assignments(user.class_id).map((a) => [a.problemId, a.dueAt]));
 }
 
-// ---------- teacher views: one student's progress, per-problem stats, similar code ----------
+// ---------- teacher views: one student's progress, per-problem stats ----------
 
 export interface ProblemProgress {
   id: number;
@@ -893,40 +916,178 @@ export function problemStats(userIds: number[]): { students: number; problems: P
   };
 }
 
-export interface SimilarPair {
-  problem: { id: number; title: string };
-  a: { id: number; name: string; studentId: string; code: string };
-  b: { id: number; name: string; studentId: string; code: string };
-  similarity: number;
+// ---------- Z80 board projects: set by the teacher, handed in by students ----------
+
+export interface Project {
+  id: number;
+  classId: number;
+  title: string;
+  detail: string;
+  dueAt: number | null;
+  createdAt: number;
+}
+interface ProjectDb {
+  id: number;
+  class_id: number;
+  title: string;
+  detail: string;
+  due_at: number | null;
+  created_at: number;
+}
+const toProject = (r: ProjectDb): Project => ({ id: r.id, classId: r.class_id, title: r.title, detail: r.detail, dueAt: r.due_at, createdAt: r.created_at });
+
+export function projectById(id: number): Project | null {
+  const r = db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as ProjectDb | undefined;
+  return r ? toProject(r) : null;
 }
 
-/** Nearly identical passing code between the given students (solves saved before code was kept fall back to their last draft). */
-export function similarCode(userIds: number[], threshold = 0.85): SimilarPair[] {
-  const ids = userIds.filter(Number.isInteger);
-  if (ids.length < 2) return [];
+function checkProject(title: string, detail: string, dueAt: number | null) {
+  const t = title.trim().replace(/\s+/g, ' ');
+  if (!t) throw new ProfileError('กรุณาใส่ชื่องาน');
+  if (t.length > 100) throw new ProfileError('ชื่องานยาวเกิน 100 ตัวอักษร');
+  if (detail.length > 4000) throw new ProfileError('รายละเอียดยาวเกิน 4000 ตัวอักษร');
+  if (dueAt != null && (!Number.isFinite(dueAt) || dueAt <= 0)) throw new ProfileError('กำหนดส่งไม่ถูกต้อง');
+  return t;
+}
+
+export function createProject(classId: number, title: string, detail: string, dueAt: number | null): Project {
+  if (!classById(classId)) throw new ProfileError('ไม่พบห้องนี้');
+  const t = checkProject(title, detail, dueAt);
+  const r = db.prepare('INSERT INTO projects (class_id, title, detail, due_at, created_at) VALUES (?, ?, ?, ?, ?)').run(classId, t, detail.trim(), dueAt, Date.now());
+  return projectById(Number(r.lastInsertRowid))!;
+}
+
+export function updateProject(id: number, patch: { title?: string; detail?: string; dueAt?: number | null }): Project {
+  const p = projectById(id);
+  if (!p) throw new ProfileError('ไม่พบงานนี้');
+  const title = checkProject(patch.title ?? p.title, patch.detail ?? p.detail, patch.dueAt === undefined ? p.dueAt : patch.dueAt);
+  db.prepare('UPDATE projects SET title = ?, detail = ?, due_at = ? WHERE id = ?').run(title, (patch.detail ?? p.detail).trim(), patch.dueAt === undefined ? p.dueAt : patch.dueAt, id);
+  return projectById(id)!;
+}
+
+export function deleteProject(id: number) {
+  if (!projectById(id)) throw new ProfileError('ไม่พบงานนี้');
+  db.prepare('DELETE FROM projects WHERE id = ?').run(id); // submissions go with it (cascade)
+}
+
+export interface ProjectRow extends Project {
+  classLabel: string;
+  /** students in the class now */
+  students: number;
+  submitted: number;
+  graded: number;
+}
+
+/** Every project, newest class/term first, with hand-in counts. */
+export function listProjects(): ProjectRow[] {
+  return (
+    db
+      .prepare(
+        `SELECT p.*, ${sectionLabelSql('c')} AS class_label,
+                (SELECT COUNT(*) FROM users u WHERE u.class_id = p.class_id AND u.role = 'student') AS students,
+                (SELECT COUNT(*) FROM submissions s WHERE s.project_id = p.id) AS submitted,
+                (SELECT COUNT(*) FROM submissions s WHERE s.project_id = p.id AND s.score IS NOT NULL) AS graded
+         FROM projects p JOIN classes c ON c.id = p.class_id
+         ORDER BY c.year DESC, c.term DESC, c.name, COALESCE(p.due_at, p.created_at) DESC`,
+      )
+      .all() as unknown as (ProjectDb & { class_label: string; students: number; submitted: number; graded: number })[]
+  ).map((r) => ({ ...toProject(r), classLabel: r.class_label, students: r.students, submitted: r.submitted, graded: r.graded }));
+}
+
+export interface SubmissionSummary {
+  id: number;
+  name: string;
+  note: string;
+  submittedAt: number;
+  late: boolean;
+  score: number | null;
+  feedback: string | null;
+  gradedAt: number | null;
+}
+interface SubmissionDb {
+  id: number;
+  project_id: number;
+  user_id: number;
+  name: string;
+  board: string;
+  code: string;
+  note: string;
+  submitted_at: number;
+  score: number | null;
+  feedback: string | null;
+  graded_at: number | null;
+}
+const toSummary = (s: SubmissionDb, dueAt: number | null): SubmissionSummary => ({
+  id: s.id,
+  name: s.name,
+  note: s.note,
+  submittedAt: s.submitted_at,
+  late: dueAt != null && s.submitted_at > dueAt,
+  score: s.score,
+  feedback: s.feedback,
+  gradedAt: s.graded_at,
+});
+
+/** The class's students (and anyone else who handed in), each with their hand-in if any. */
+export function projectSubmissions(projectId: number) {
+  const p = projectById(projectId);
+  if (!p) throw new ProfileError('ไม่พบงานนี้');
   const rows = db
     .prepare(
-      `SELECT s.user_id, s.problem_id, COALESCE(s.code, d.code) AS code, u.name, u.student_id
-       FROM solves s JOIN users u ON u.id = s.user_id LEFT JOIN drafts d ON d.user_id = s.user_id AND d.problem_id = s.problem_id
-       WHERE s.user_id IN (${ids.map(() => '?').join(',')})`,
+      `SELECT u.id AS uid, u.name AS uname, u.student_id, s.*
+       FROM users u LEFT JOIN submissions s ON s.user_id = u.id AND s.project_id = ?
+       WHERE u.role = 'student' AND (u.class_id = ? OR s.id IS NOT NULL)
+       ORDER BY u.student_id`,
     )
-    .all(...ids) as { user_id: number; problem_id: number; code: string | null; name: string; student_id: string }[];
-  const key = (u: number, p: number) => `${u}:${p}`;
-  const byKey = new Map(rows.map((r) => [key(r.user_id, r.problem_id), r]));
-  const pairs = findSimilar(
-    rows.filter((r) => r.code).map((r) => ({ userId: r.user_id, problemId: r.problem_id, code: r.code! })),
-    threshold,
+    .all(projectId, p.classId) as unknown as (SubmissionDb & { uid: number; uname: string; student_id: string })[];
+  return {
+    project: p,
+    rows: rows.map((r) => ({ user: { id: r.uid, name: r.uname, studentId: r.student_id }, submission: r.id ? toSummary(r, p.dueAt) : null })),
+  };
+}
+
+/** One hand-in with its board and program (to open on the board page). */
+export function submissionById(id: number) {
+  const s = db.prepare('SELECT * FROM submissions WHERE id = ?').get(id) as SubmissionDb | undefined;
+  if (!s) return null;
+  const p = projectById(s.project_id)!;
+  const u = userById(s.user_id)!;
+  return { ...toSummary(s, p.dueAt), board: JSON.parse(s.board) as unknown, code: s.code, project: { id: p.id, title: p.title }, student: { id: u.id, name: u.name, studentId: u.student_id } };
+}
+
+export function gradeSubmission(id: number, score: number | null, feedback: string) {
+  if (score != null && (!Number.isFinite(score) || score < 0 || score > 1000)) throw new ProfileError('คะแนนต้องเป็นตัวเลข 0–1000');
+  if (feedback.length > 2000) throw new ProfileError('ความเห็นยาวเกิน 2000 ตัวอักษร');
+  const r = db.prepare('UPDATE submissions SET score = ?, feedback = ?, graded_at = ? WHERE id = ?').run(score, feedback.trim() || null, score == null && !feedback.trim() ? null : Date.now(), id);
+  if (!Number(r.changes)) throw new ProfileError('ไม่พบงานที่ส่งนี้');
+  return submissionById(id)!;
+}
+
+/** Projects of the student's current class, each with what they handed in. */
+export function myProjects(user: User) {
+  if (user.class_id == null) return [];
+  const projects = (db.prepare('SELECT * FROM projects WHERE class_id = ? ORDER BY COALESCE(due_at, created_at)').all(user.class_id) as unknown as ProjectDb[]).map(toProject);
+  const mine = new Map(
+    (db.prepare('SELECT * FROM submissions WHERE user_id = ?').all(user.id) as unknown as SubmissionDb[]).map((s) => [s.project_id, s]),
   );
-  return pairs.slice(0, 200).map((p) => {
-    const x = byKey.get(key(p.a, p.problemId))!;
-    const y = byKey.get(key(p.b, p.problemId))!;
-    return {
-      problem: { id: p.problemId, title: problemById(p.problemId)?.title ?? `#${p.problemId}` },
-      a: { id: x.user_id, name: x.name, studentId: x.student_id, code: x.code! },
-      b: { id: y.user_id, name: y.name, studentId: y.student_id, code: y.code! },
-      similarity: p.similarity,
-    };
-  });
+  return projects.map((p) => ({ ...p, submission: mine.has(p.id) ? toSummary(mine.get(p.id)!, p.dueAt) : null }));
+}
+
+/** A student hands in (or re-hands in) their board for a project of their class. Locked once graded. */
+export function submitProject(user: User, projectId: number, sub: { name: string; board: unknown; code: string; note: string }) {
+  const p = projectById(projectId);
+  if (!p || p.classId !== user.class_id) throw new ProfileError('ไม่พบงานนี้ในห้องของคุณ');
+  const b = sub.board as { parts?: unknown; wires?: unknown } | null;
+  if (!b || !Array.isArray(b.parts) || !Array.isArray(b.wires)) throw new ProfileError('ข้อมูลบอร์ดไม่ถูกต้อง');
+  if (typeof sub.code !== 'string' || sub.code.length > 200_000) throw new ProfileError('โค้ดไม่ถูกต้องหรือยาวเกินไป');
+  if (sub.note.length > 1000) throw new ProfileError('ข้อความถึงอาจารย์ยาวเกิน 1000 ตัวอักษร');
+  const prev = db.prepare('SELECT score, graded_at FROM submissions WHERE project_id = ? AND user_id = ?').get(projectId, user.id) as { score: number | null; graded_at: number | null } | undefined;
+  if (prev?.graded_at) throw new ProfileError('อาจารย์ตรวจงานนี้แล้ว ส่งใหม่ไม่ได้ — ติดต่ออาจารย์ถ้าต้องการแก้');
+  db.prepare(
+    `INSERT INTO submissions (project_id, user_id, name, board, code, note, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (project_id, user_id) DO UPDATE SET name = excluded.name, board = excluded.board, code = excluded.code, note = excluded.note, submitted_at = excluded.submitted_at`,
+  ).run(projectId, user.id, sub.name.trim().slice(0, 60) || p.title, JSON.stringify(sub.board), sub.code, sub.note.trim(), Date.now());
+  return myProjects(user).find((x) => x.id === projectId)!;
 }
 
 // ---------- audit log ----------
